@@ -491,7 +491,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_download_video',
-        description: '[네트워크] OCS UniPlayer MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드합니다 (제한시간 30분). 이 도구는 ChatGPT에 동영상 바이트를 전달하지 않습니다. 외부에서 받아야 하면 file_id="video:<video_id>"로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 별도 발급해야 합니다. HLS/m3u8/DRM/진도 추적형 영상은 지원하지 않습니다. 캐시에는 file_id="video:<video_id>"로 기록되므로 재다운로드 시 eclass_remove_download에 이 형식을 사용하세요.',
+        description: '[네트워크] OCS 메타데이터에서 확인한 직접 MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드합니다 (제한시간 30분). 이 도구는 재생·진도·출석 API를 호출하지 않고 동영상 바이트도 ChatGPT에 전달하지 않습니다. 외부에서 받아야 하면 file_id="video:<video_id>"로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 별도 발급해야 합니다. 캐시에는 file_id="video:<video_id>"로 기록되므로 재다운로드 시 eclass_remove_download에 이 형식을 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {

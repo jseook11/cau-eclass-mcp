@@ -348,8 +348,9 @@ OCS UniPlayer MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 
   - CDN MP4 후보를 만든 뒤 Range probe로 `video/mp4`와 MP4 signature를 확인한 경우에만 다운로드한다 (CDN이 Range를 무시해도 앞 16바이트만 읽는다).
   - 본문은 메모리 버퍼링 없이 `<파일명>.part` 임시 파일로 스트리밍한 뒤 완료 시 rename — 부분 파일이 정식 경로에 남지 않는다.
   - CDN 요청에는 Canvas/LearningX 인증 정보를 보내지 않는다.
-- 미지원:
-  - HLS/m3u8, DRM/encrypted media, segment stream, 진도/출석 추적 이벤트 우회.
+- 범위:
+  - OCS 메타데이터에서 검증 가능한 직접 MP4 주소를 제공하는 콘텐츠를 받는다. 이 도구는 재생·진도·출석 이벤트 API를 호출하지 않는다.
+  - 메타데이터가 직접 MP4를 제공하지 않으면 `VIDEO_DOWNLOAD_UNSUPPORTED`로 실제 검증 실패 사유를 반환한다. 이 코드는 DRM 또는 진도추적 여부를 추정하지 않는다.
   - 비디오가 아닌 파일 자료는 `eclass_download_file` 또는 `eclass_download_materials_batch`를 사용한다.
 - 외부에서 동영상 파일을 받아야 하면 `file_id="video:<video_id>"`로 `eclass_file_handoff`를 호출해 공개 URL을 별도 발급한다.
 

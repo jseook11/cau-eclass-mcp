@@ -8,6 +8,7 @@ import {
   buildOcsMp4Url,
   downloadVideo,
   extractOcsContentId,
+  parseOcsMp4UrlFromXml,
   parseMainMediaFromXml,
 } from '../src/tools/download-video.js';
 import type { DownloadRecord } from '../src/file-cache.js';
@@ -29,7 +30,22 @@ test('OCS video helpers parse supported UniPlayer MP4 metadata', () => {
     buildOcsMp4Url('abc123', 'screen.mp4'),
     'https://cau-cms-object.cdn.gov-ntruss.com/contents_new/cau1000001/abc123/contents/media_files/screen.mp4',
   );
+  assert.equal(
+    parseMainMediaFromXml('<main_media media_id="story-1">screen.mp4</main_media>'),
+    'screen.mp4',
+  );
   assert.throws(() => parseMainMediaFromXml('<main_media>playlist.m3u8</main_media>'), /Only OCS UniPlayer MP4/);
+});
+
+test('OCS video helpers accept a progressive nested media_uri for the same content', () => {
+  const xml = `
+    <content><main_media><desktop><html5><method>progressive</method>
+    <media_uri>https://cau-cms-object.cdn.gov-ntruss.com/contents_new/cau1000001/abc123/contents/media_files/mobile/ssmovie.mp4</media_uri>
+    </html5></desktop></main_media></content>`;
+  assert.equal(
+    parseOcsMp4UrlFromXml('abc123', xml),
+    'https://cau-cms-object.cdn.gov-ntruss.com/contents_new/cau1000001/abc123/contents/media_files/mobile/ssmovie.mp4',
+  );
 });
 
 test('downloadVideo verifies and downloads OCS MP4 without sending credentials to CDN', async () => {
@@ -68,7 +84,7 @@ test('downloadVideo verifies and downloads OCS MP4 without sending credentials t
       video_id: 'v1',
       course_id: 88,
       url: 'https://ocs.cau.ac.kr/em/abc123',
-      display_name: 'lecture',
+      display_name: 'lecture_01.1_intro',
       type: 'mp4',
       source: 'courseresource',
     }, cache);
@@ -78,7 +94,7 @@ test('downloadVideo verifies and downloads OCS MP4 without sending credentials t
     assert.equal(result.strategy, 'ocs_uniplayer_mp4');
     assert.equal(result.skipped, false);
     assert.equal(result.size_bytes, 11);
-    assert.ok(result.local_path.endsWith(path.join('88', 'lecture.mp4')));
+    assert.ok(result.local_path.endsWith(path.join('88', 'lecture_01.1_intro.mp4')));
     assert.equal(cache.records.length, 1);
     assert.equal(cache.records[0].source, 'courseresource');
     assert.ok(calls.every((call) => call.auth === null));
@@ -184,7 +200,7 @@ test('downloadVideo reports transient CDN failures as retryable', async () => {
   }
 });
 
-test('downloadVideo rejects unsupported HLS metadata', async () => {
+test('downloadVideo reports metadata that does not expose a direct MP4', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => {
     return new Response('<root><main_media>playlist.m3u8</main_media></root>', { status: 200 });
@@ -201,7 +217,7 @@ test('downloadVideo rejects unsupported HLS metadata', async () => {
     assert.equal(result.ok, false);
     if (result.ok) throw new Error('expected failure');
     assert.equal(result.error_code, 'VIDEO_DOWNLOAD_UNSUPPORTED');
-    assert.match(result.next_action ?? '', /HLS\/m3u8\/DRM/);
+    assert.match(result.next_action ?? '', /직접 MP4/);
   } finally {
     globalThis.fetch = originalFetch;
   }

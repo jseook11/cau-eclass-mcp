@@ -24,9 +24,8 @@ const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 const VIDEO_CACHE_PREFIX = 'video:';
 
 /**
- * Marks failures that mean "this video can never be downloaded by this tool"
- * (wrong URL shape, HLS/DRM, signature mismatch) as opposed to transient
- * network/CDN failures which are retryable.
+ * Marks invalid OCS metadata, unexpected origins, and non-MP4 responses as
+ * non-retryable. This downloader never calls progress or attendance APIs.
  */
 class UnsupportedVideoError extends Error {}
 
@@ -56,7 +55,9 @@ function getDownloadDir(): string {
 function sanitizeName(displayName: string): string | null {
   const safe = sanitizeFileName(displayName);
   if (!safe) return null;
-  return path.extname(safe) ? safe : `${safe}.mp4`;
+  // A lecture title such as "algorithm_01.1_introduction" contains a dot but
+  // does not actually have a media extension. Only preserve a real MP4 suffix.
+  return path.extname(safe).toLowerCase() === '.mp4' ? safe : `${safe}.mp4`;
 }
 
 function decodeXmlEntities(value: string): string {
@@ -86,8 +87,8 @@ export function extractOcsContentId(rawUrl: string): string {
 }
 
 export function parseMainMediaFromXml(xml: string): string {
-  const cdataMatch = /<main_media>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/main_media>/i.exec(xml);
-  const plainMatch = /<main_media>\s*([^<]*?)\s*<\/main_media>/i.exec(xml);
+  const cdataMatch = /<main_media\b[^>]*>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/main_media>/i.exec(xml);
+  const plainMatch = /<main_media\b[^>]*>\s*([^<]*?)\s*<\/main_media>/i.exec(xml);
   const match = cdataMatch ?? plainMatch;
   const media = decodeXmlEntities(match?.[1]?.trim() ?? '');
   if (!media) {
@@ -97,7 +98,7 @@ export function parseMainMediaFromXml(xml: string): string {
     throw new UnsupportedVideoError('OCS metadata main_media rejected');
   }
   if (!/\.mp4$/i.test(media)) {
-    throw new UnsupportedVideoError('Only OCS UniPlayer MP4 media is supported');
+    throw new UnsupportedVideoError('OCS metadata main_media is not an MP4 filename');
   }
   return media;
 }
@@ -110,6 +111,35 @@ export function buildOcsMp4Url(contentId: string, mainMedia: string): string {
     throw new UnsupportedVideoError('Invalid OCS media filename');
   }
   return `${OCS_CDN_MEDIA_ROOT}/${contentId}/contents/media_files/${encodeURIComponent(mainMedia)}`;
+}
+
+/**
+ * Newer UniPlayer metadata nests the progressive MP4 URL under
+ * main_media/desktop/html5/media_uri instead of exposing a plain main_media
+ * filename. Accept that URL only when it remains inside this content's known
+ * CDN media directory; otherwise fall back to the legacy filename format.
+ */
+export function parseOcsMp4UrlFromXml(contentId: string, xml: string): string {
+  const mediaUriMatch = /<media_uri>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/media_uri>/i.exec(xml);
+  const mediaUri = decodeXmlEntities(mediaUriMatch?.[1]?.trim() ?? '');
+  if (!mediaUri) return buildOcsMp4Url(contentId, parseMainMediaFromXml(xml));
+
+  let parsed: URL;
+  try {
+    parsed = new URL(mediaUri);
+  } catch {
+    throw new UnsupportedVideoError('OCS metadata media_uri rejected: invalid URL');
+  }
+  const expectedPrefix = `/contents_new/cau1000001/${contentId}/contents/media_files/`;
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.origin !== OCS_CDN_ORIGIN ||
+    !parsed.pathname.startsWith(expectedPrefix) ||
+    !/\.mp4$/i.test(parsed.pathname)
+  ) {
+    throw new UnsupportedVideoError('OCS metadata media_uri rejected');
+  }
+  return parsed.toString();
 }
 
 async function fetchOcsMetadata(contentId: string): Promise<string> {
@@ -253,8 +283,7 @@ export async function downloadVideo(
     }
 
     const metadata = await fetchOcsMetadata(contentId);
-    const mainMedia = parseMainMediaFromXml(metadata);
-    const mp4Url = buildOcsMp4Url(contentId, mainMedia);
+    const mp4Url = parseOcsMp4UrlFromXml(contentId, metadata);
     await verifyOcsMp4(mp4Url);
     const downloaded = await downloadVerifiedMp4(input.course_id, mp4Url, safeName);
 
@@ -285,7 +314,7 @@ export async function downloadVideo(
         error_code: 'VIDEO_DOWNLOAD_UNSUPPORTED',
         message: '지원되는 OCS UniPlayer MP4 동영상만 다운로드할 수 있습니다.',
         retryable: false,
-        next_action: 'HLS/m3u8/DRM/진도 추적형 영상은 지원하지 않습니다. 파일 자료는 eclass_download_file을 사용하세요.',
+        next_action: 'OCS 메타데이터에서 검증 가능한 직접 MP4 주소를 찾지 못했습니다. 해당 OCS 링크와 응답 형식을 확인하세요.',
         debug: sanitizeDebug(reason),
       };
     }

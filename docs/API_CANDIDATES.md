@@ -243,7 +243,8 @@ https://cau-cms-object.cdn.gov-ntruss.com/contents_new/cau1000001/<content_id>/c
   3. `main_media` 파일명과 CDN media root 조합.
   4. `HEAD` 또는 `Range: bytes=0-15`로 `video/mp4`, `Accept-Ranges`, MP4 signature 확인.
   5. 확인된 direct MP4만 다운로드 허용.
-- HLS(`m3u8`), segment stream, DRM/encrypted media, 진도/출석 추적용 이벤트 API 우회는 구현하지 않는다.
+- 다운로드 경로는 재생·진도·출석 이벤트 API를 호출하지 않는다. 메타데이터가 직접 MP4를
+  제공하지 않는 경우에는 응답 형식을 별도로 확인한다.
 - 현재 `unsupported_streaming_media`를 일괄 실패 처리하고 있으므로, `ocs_uniplayer_mp4` 같은 별도 strategy로 분리하는 편이 안전하다.
 
 ## 다음 액션

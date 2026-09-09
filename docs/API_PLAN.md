@@ -24,7 +24,8 @@
   - Existing `eclass_download_file` and `eclass_download_materials_batch` stay for non-video files.
   - Video-like types (`mp4`, `video/*`, `hls`, `m3u8`, etc.) return a clear error pointing to the video tool.
   - Add `eclass_download_video` with OCS UniPlayer MP4 support only.
-  - Do not support HLS, DRM, encrypted media, or progress/attendance event bypass.
+- Download only OCS metadata-backed direct MP4 responses; do not invoke playback,
+  progress, or attendance APIs.
 
 ## Public Interfaces
 - `eclass_get_materials` remains compatible, but video materials should be identifiable by `type` and URL.
@@ -55,7 +56,8 @@
 - Mocked tests for dynamic tool ID recovery.
 - `getAssignments` tests for course assignments API path and planner fallback path.
 - Download strategy tests proving video types no longer route through file download.
-- `eclass_download_video` tests for OCS URL parsing, XML parsing, MP4 signature validation, CDN credential isolation, cache hit, and unsupported HLS/DRM failure.
+- `eclass_download_video` tests for OCS URL parsing, legacy and nested XML metadata,
+  MP4 signature validation, CDN credential isolation, cache hit, and clear metadata failures.
 - Run `pnpm test` and `pnpm build`.
 
 ## Documentation
