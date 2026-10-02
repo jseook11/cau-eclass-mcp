@@ -7,6 +7,24 @@ import { CanvasClient } from '../src/canvas-client.js';
 import type { CanvasClient as CanvasClientType } from '../src/canvas-client.js';
 import type { BrowserSession } from '../src/browser-session.js';
 import type { FileCache } from '../src/file-cache.js';
+import { materialFingerprint } from '../src/material-acquisition.js';
+
+test('ExternalTool wrappers stay unresolved without semantic evidence, even in Online lecture', async () => {
+  const result = await getMaterials(mockClient(async () => [{
+    id: 1, name: 'Online lecture', items: [{
+      id: 3736209, title: 'Chapter 5', type: 'ExternalTool',
+      html_url: '/courses/147845/modules/items/3736209',
+    }],
+  }]), mockSession({ interceptModulebuilder: async () => [{
+    id: '3736210', title: 'Chapter 5', type: 'pdf', url: 'https://ocs.cau.ac.kr/em/slides',
+  }] }), 147845, ['external', 'modulebuilder']);
+  assert.equal(result.materials.length, 2);
+  const wrapper = result.materials.find((m) => m.id === '3736209')!;
+  assert.equal(wrapper.asset_kind, 'unresolved');
+  assert.equal(wrapper.downloadable, false);
+  assert.equal(wrapper.acquisition_policy, 'needs_resolution');
+  assert.equal(result.materials.find((m) => m.id === '3736210')!.downloadable, true);
+});
 
 function mockClient(
   fetchAll: (path: string, params?: Record<string, string>) => Promise<unknown[]>,
@@ -249,6 +267,8 @@ test('getMaterials merges the same opened weekly item from modulebuilder and ext
     is_playwright_required: true,
     is_playwright_required: true,
     is_playright_required: true,
+    asset_kind: 'video', downloadable: false, acquisition_policy: 'exclude',
+    resolution_reason: 'explicit_video_type', fingerprint: materialFingerprint(result.materials[0]),
   });
 });
 
@@ -352,6 +372,8 @@ test('getMaterials uses module content_id to merge a module-item URL with Files'
     sources: ['modules', 'files'],
     url_source: 'files',
     module_name: '1주차',
+    asset_kind: 'document', downloadable: true, acquisition_policy: 'download',
+    resolution_reason: 'explicit_file_type', fingerprint: materialFingerprint(result.materials[0]),
   });
   assert.equal(requestedPaths.filter((path) => path.includes('/files')).length, 1);
 });

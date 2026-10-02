@@ -7,6 +7,19 @@ import * as path from 'node:path';
 import { downloadOne } from '../src/tools/download.js';
 import type { DownloadDeps } from '../src/tools/download.js';
 import type { DownloadRecord, ResolvedLocator } from '../src/file-cache.js';
+import { materialFingerprint } from '../src/material-acquisition.js';
+
+test('ExternalTool without an artifact returns needs_resolution instead of a retryable download failure', async () => {
+  const result = await downloadOne({ session: {
+    resolveExternalToolLaunch: async () => { throw new Error('ExternalTool launch did not yield a downloadable file or OCS viewer URL'); },
+  }, fileCache: makeFileCache(), token: 'tok' } as unknown as DownloadDeps, {
+    file_id: '3736209', course_id: 147845, display_name: 'Chapter 5', type: 'ExternalTool',
+    url: 'https://eclass3.cau.ac.kr/courses/147845/modules/items/3736209',
+  });
+  assert.equal(result.status, 'needs_resolution');
+  assert.equal(result.retryable, false);
+  assert.equal(result.error_code, 'EXTERNAL_TOOL_NO_ARTIFACT');
+});
 
 function makeFileCache() {
   const records: DownloadRecord[] = [];
@@ -118,6 +131,7 @@ test('downloadOne reuses a cached ExternalTool locator instead of launching agai
     resolved_type: 'pdf',
     display_name: 'iframe.pdf',
     resolved_at: '2026-09-01T00:00:00.000Z',
+    fingerprint: materialFingerprint({ file_id: '11', display_name: 'iframe.pdf', type: 'ExternalTool', url: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11' }),
   });
   const deps = { session, fileCache, token: 'tok' } as unknown as DownloadDeps;
 
@@ -142,7 +156,7 @@ test('downloadOne reuses a cached ExternalTool locator instead of launching agai
   }
 });
 
-test('downloadOne hands a launched OCS viewer URL to the existing intercept path', async () => {
+test('downloadOne keeps a generic OCS viewer unresolved instead of assuming it is a slide document', async () => {
   const originalDir = process.env.ECLASS_DOWNLOAD_DIR;
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ext-tool-ocs-'));
   process.env.ECLASS_DOWNLOAD_DIR = tempDir;
@@ -179,10 +193,10 @@ test('downloadOne hands a launched OCS viewer URL to the existing intercept path
       type: 'ExternalTool',
     });
 
-    assert.deepEqual(intercepted, ['https://ocs.cau.ac.kr/em/slide-id']);
-    assert.equal(result.status, 'downloaded');
+    assert.deepEqual(intercepted, []);
+    assert.equal(result.status, 'needs_resolution');
     assert.equal(result.strategy, 'external_tool_launch');
-    assert.equal(fileCache.getResolvedLocator('12')?.resolved_url, 'https://ocs.cau.ac.kr/em/slide-id');
+    assert.equal(fileCache.getResolvedLocator('12'), undefined);
   } finally {
     if (originalDir === undefined) delete process.env.ECLASS_DOWNLOAD_DIR;
     else process.env.ECLASS_DOWNLOAD_DIR = originalDir;

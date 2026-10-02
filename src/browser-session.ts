@@ -31,7 +31,7 @@ import { redactUrl } from './discovery/redact.js';
 import { debugLog } from './secrets.js';
 import { fetchCourseResourceViaApi } from './learningx-client.js';
 import { parseModulebuilderItems, parseResourceItems } from './resource-items.js';
-import { sanitizeFileName } from './utils.js';
+import { sanitizeFileName, materialStorageKey } from './utils.js';
 import {
   isOcsViewerUrl,
   resolveLaunchFromContext,
@@ -488,7 +488,7 @@ async function readLtiPageSnapshot(page: Page): Promise<LtiPageSnapshot> {
         const iframes = Array.from(document.querySelectorAll('iframe'))
           .map((iframe) => iframe.getAttribute('src'))
           .filter((src): src is string => Boolean(src && src.trim()));
-        return { url: location.href, forms, iframes };
+        return { url: location.href, forms, iframes, hasVideo: document.querySelector('video') !== null };
       });
     } catch {
       return { url: frame.url(), forms: [] as LtiPageSnapshot['forms'], iframes: [] as string[] };
@@ -499,6 +499,7 @@ async function readLtiPageSnapshot(page: Page): Promise<LtiPageSnapshot> {
     url: page.url(),
     forms: snapshots.flatMap((snapshot) => snapshot.forms),
     iframes: snapshots.flatMap((snapshot) => snapshot.iframes),
+    hasVideo: snapshots.some((snapshot) => 'hasVideo' in snapshot && snapshot.hasVideo),
   };
 }
 
@@ -1407,7 +1408,7 @@ export class BrowserSession {
     if (!safeName) {
       throw new Error(`[browser-session] Invalid displayName: ${JSON.stringify(displayName)}`);
     }
-    const dir = path.join(expandTilde(downloadDir), String(courseId));
+    const dir = path.join(expandTilde(downloadDir), String(courseId), materialStorageKey(resourceId));
     await fs.mkdir(dir, { recursive: true });
     const destPath = path.join(dir, safeName);
 
@@ -1573,7 +1574,7 @@ export class BrowserSession {
             });
           }
           recordObservation({
-            source: source === 'popup' ? 'popup' : 'response',
+            source: 'response',
             url: response.url(),
             status: response.status(),
             contentType: response.headers()['content-type'],
@@ -1613,7 +1614,14 @@ export class BrowserSession {
           }
           recordObservation({ source: 'navigation', url: page.url() });
         },
-        readSnapshot: async () => readLtiPageSnapshot(page),
+        readSnapshot: async () => {
+          const snapshots = await Promise.all(context.pages().map(readLtiPageSnapshot));
+          return {
+            url: page.url(), forms: snapshots.flatMap((snapshot) => snapshot.forms),
+            iframes: snapshots.flatMap((snapshot) => snapshot.iframes),
+            hasVideo: snapshots.some((snapshot) => snapshot.hasVideo),
+          };
+        },
         submitForm: async (selector) => {
           await submitLtiForm(page, selector);
         },

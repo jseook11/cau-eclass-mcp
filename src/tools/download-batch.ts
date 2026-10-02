@@ -9,6 +9,9 @@ export interface BatchDownloadResult {
     downloaded: number;
     skipped: number;
     failed: number;
+    excluded: number;
+    needs_resolution: number;
+    not_open: number;
   };
   results: DownloadOutcome[];
 }
@@ -36,11 +39,14 @@ export async function downloadMaterialsBatch(
   const downloaded = results.filter((r) => r.status === 'downloaded').length;
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const failed = results.filter((r) => r.status === 'failed').length;
+  const excluded = results.filter((r) => ['excluded_video', 'excluded_interactive', 'not_downloadable'].includes(r.status)).length;
+  const needsResolution = results.filter((r) => r.status === 'needs_resolution').length;
+  const notOpen = results.filter((r) => r.status === 'not_open').length;
 
   return {
     ok: failed === 0,
     course_id: courseId,
-    summary: { total: results.length, downloaded, skipped, failed },
+    summary: { total: results.length, downloaded, skipped, failed, excluded, needs_resolution: needsResolution, not_open: notOpen },
     results,
   };
 }

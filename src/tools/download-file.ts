@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { FileCache } from '../file-cache.js';
-import { expandTilde, sanitizeFileName } from '../utils.js';
+import { expandTilde, sanitizeFileName, materialStorageKey } from '../utils.js';
 
 function getDownloadDir(): string {
   return process.env.ECLASS_DOWNLOAD_DIR ?? '~/Downloads/eclass';
@@ -112,15 +112,14 @@ export interface CacheValidationHit {
 }
 
 interface CacheValidationView {
-  get(fileId: string): { local_path: string; size_bytes: number } | null | undefined;
+  get(fileId: string): { local_path: string; size_bytes: number; course_id?: number; source?: string | null } | null | undefined;
   findByName(courseId: number, displayName: string): { local_path: string; size_bytes: number } | null | undefined;
   record(entry: import('../file-cache.js').DownloadRecord): void;
 }
 
 /**
- * Validates whether a material is already downloaded, by file_id then by
- * (course_id + display_name + size + on-disk existence). Re-registers the new
- * file_id when a name/size match is found. Returns the hit, or null to download.
+ * Validates a download by source-native ID and course. Titles and local byte
+ * sizes cannot establish that two different source IDs identify the same file.
  * Shared by downloadFile (direct path) and downloadOne (unified executor).
  */
 export async function validateCachedDownload(
@@ -128,31 +127,12 @@ export async function validateCachedDownload(
   item: { file_id: string; course_id: number; display_name: string; source?: string | null },
 ): Promise<CacheValidationHit | null> {
   const existing = cache.get(item.file_id);
-  if (existing) {
+  if (existing && existing.course_id === item.course_id && (!item.source || !existing.source || item.source === existing.source)) {
     try {
       await fs.access(existing.local_path);
       return { local_path: existing.local_path, size_bytes: existing.size_bytes };
     } catch {
       // File was deleted from disk — re-download
-    }
-  }
-
-  const existingByName = cache.findByName(item.course_id, item.display_name);
-  if (existingByName) {
-    try {
-      const stat = await fs.stat(existingByName.local_path);
-      if (stat.size === existingByName.size_bytes) {
-        // Same size → unchanged file; register the new file_id pointing at it
-        cache.record({
-          ...(existingByName as import('../file-cache.js').DownloadRecord),
-          file_id: item.file_id,
-          ...(item.source !== undefined ? { source: item.source } : {}),
-        });
-        return { local_path: existingByName.local_path, size_bytes: existingByName.size_bytes };
-      }
-      // Different size → file was updated, fall through to re-download
-    } catch {
-      // File deleted from disk — fall through to re-download
     }
   }
 
@@ -168,6 +148,7 @@ export async function downloadFileToDisk(
   url: string,
   displayName: string,
   token: string,
+  fileId?: string,
 ): Promise<{ local_path: string; size_bytes: number }> {
   // Validate download URL origin before sending bearer token
   assertAllowedOrigin(url);
@@ -182,7 +163,7 @@ export async function downloadFileToDisk(
     throw new Error(`Invalid displayName: ${JSON.stringify(displayName)}`);
   }
 
-  const dir = path.join(expandTilde(getDownloadDir()), String(courseId));
+  const dir = path.join(expandTilde(getDownloadDir()), String(courseId), ...(fileId ? [materialStorageKey(fileId)] : []));
   await fs.mkdir(dir, { recursive: true });
 
   const response = await fetchDownloadResponse(url, token);
@@ -229,6 +210,7 @@ export async function downloadFile(
     url,
     displayName,
     token,
+    fileId,
   );
 
   cache.record({

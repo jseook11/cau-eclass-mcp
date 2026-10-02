@@ -55,10 +55,11 @@ test('downloadMaterialsBatch handles mixed strategies with partial success', asy
       { file_id: 'f3', course_id: 88, url: null, display_name: 'movie.mp4', type: 'mp4', source: 'modulebuilder' },
     ]);
 
-    assert.equal(result.ok, false);             // one failure (streaming)
+    assert.equal(result.ok, true);
     assert.equal(result.summary.total, 3);
     assert.equal(result.summary.downloaded, 2);
-    assert.equal(result.summary.failed, 1);
+    assert.equal(result.summary.failed, 0);
+    assert.equal(result.summary.excluded, 1);
 
     const byId = Object.fromEntries(result.results.map((r) => [r.file_id, r]));
     assert.equal(byId['f1'].strategy, 'canvas_file');
@@ -66,8 +67,7 @@ test('downloadMaterialsBatch handles mixed strategies with partial success', asy
     assert.equal(byId['f2'].strategy, 'ocs_intercept');
     assert.equal(byId['f2'].status, 'downloaded');
     assert.equal(byId['f3'].strategy, 'unsupported_streaming_media');
-    assert.equal(byId['f3'].status, 'failed');
-    assert.equal(byId['f3'].error_code, 'DOWNLOAD_UNSUPPORTED_MEDIA');
+    assert.equal(byId['f3'].status, 'excluded_video');
     assert.equal(byId['f3'].retryable, false);
 
     // source threaded into cache records
@@ -87,7 +87,7 @@ test('downloadMaterialsBatch stops at first failure when continue_on_error is fa
   const deps = { session, fileCache, token: 'tok' } as unknown as DownloadDeps;
 
   const result = await downloadMaterialsBatch(deps, 88, [
-    { file_id: 'f1', course_id: 88, url: null, display_name: 'a.mp4', type: 'video' },
+    { file_id: 'f1', course_id: 88, url: null, display_name: '/', type: 'pdf' },
     { file_id: 'f2', course_id: 88, url: 'https://eclass3.cau.ac.kr/files/2/download', display_name: 'b.pdf' },
   ], false);
 

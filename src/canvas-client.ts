@@ -103,11 +103,15 @@ export class CanvasClient {
     throw new CanvasApiError(401, url);
   }
 
-  async fetchAll<T>(path: string, params?: Record<string, string>): Promise<T[]> {
+  async fetchAll<T>(path: string, params?: Record<string, string | readonly string[]>): Promise<T[]> {
     const url = new URL(this.baseUrl + path);
     if (params) {
       for (const [key, value] of Object.entries(params)) {
-        url.searchParams.set(key, value);
+        if (Array.isArray(value)) {
+          for (const entry of value) url.searchParams.append(key, entry);
+        } else {
+          url.searchParams.set(key, value as string);
+        }
       }
     }
 

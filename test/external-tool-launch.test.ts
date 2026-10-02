@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { AcquisitionError } from '../src/material-acquisition.js';
 
 import {
   isExternalToolLaunchRequested,
@@ -13,6 +14,34 @@ import {
 function observation(partial: LaunchObservation): LaunchObservation {
   return partial;
 }
+
+test('launch video evidence outranks a generic OCS viewer and excludes failed PDF responses', () => {
+  assert.equal(selectLaunchArtifact([
+    { source: 'navigation', url: 'https://ocs.cau.ac.kr/em/player' },
+    { source: 'response', url: 'https://ocs.cau.ac.kr/video.mp4', status: 206, contentType: 'video/mp4' },
+    { source: 'response', url: 'https://eclass3.cau.ac.kr/file.pdf', status: 503, contentType: 'application/pdf' },
+  ])?.kind, 'video');
+});
+
+test('a video player DOM is semantic video evidence after LTI launch', async () => {
+  const result = await resolveLaunchFromContext({
+    moduleItemUrl: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
+    goto: async () => {}, submitForm: async () => {}, observations: () => [],
+    readSnapshot: async () => ({ url: 'https://ocs.cau.ac.kr/em/player', forms: [], iframes: [], hasVideo: true }),
+  });
+  assert.equal(result.kind, 'video');
+});
+
+test('launch 5xx, 429 and auth 401 retain a retryable reason instead of no-artifact classification', async () => {
+  for (const status of [503, 429, 401, 403]) {
+    await assert.rejects(resolveLaunchFromContext({
+      moduleItemUrl: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
+      goto: async () => {}, submitForm: async () => {},
+      observations: () => [{ source: 'response', url: 'https://eclass3.cau.ac.kr/learningx/lti/launch', status, contentType: 'text/html' }],
+      readSnapshot: async () => ({ url: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11', forms: [], iframes: [] }),
+    }), (err: unknown) => err instanceof AcquisitionError && err.code === 'EXTERNAL_TOOL_HTTP_ERROR' && err.retryable === (status !== 403));
+  }
+});
 
 test('isExternalToolLaunchRequested keeps the misspelled flag as an alias', () => {
   assert.equal(isExternalToolLaunchRequested({ type: 'ExternalTool' }), true);

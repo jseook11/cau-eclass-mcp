@@ -3,6 +3,19 @@ import assert from 'node:assert/strict';
 
 import { CanvasClient } from '../src/canvas-client.js';
 
+test('CanvasClient sends repeated include parameters so material lock details are requested', async () => {
+  const originalFetch = globalThis.fetch;
+  let requested: URL | undefined;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requested = new URL(String(input));
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await new CanvasClient('https://eclass3.cau.ac.kr', 'token').fetchAll('/api/v1/courses/1/modules', { 'include[]': ['items', 'content_details'] });
+    assert.deepEqual(requested!.searchParams.getAll('include[]'), ['items', 'content_details']);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('CanvasClient retries once with a fresh token on 401', async () => {
   const originalFetch = globalThis.fetch;
   const authHeaders: Array<string | null> = [];

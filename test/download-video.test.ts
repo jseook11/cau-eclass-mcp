@@ -34,7 +34,7 @@ test('OCS video helpers parse supported UniPlayer MP4 metadata', () => {
     parseMainMediaFromXml('<main_media media_id="story-1">screen.mp4</main_media>'),
     'screen.mp4',
   );
-  assert.throws(() => parseMainMediaFromXml('<main_media>playlist.m3u8</main_media>'), /Only OCS UniPlayer MP4/);
+  assert.throws(() => parseMainMediaFromXml('<main_media>playlist.m3u8</main_media>'), /main_media is not an MP4 filename/);
 });
 
 test('OCS video helpers accept a progressive nested media_uri for the same content', () => {

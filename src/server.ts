@@ -82,14 +82,28 @@ const GetAnnouncementsSchema = z.object({
 const GetMaterialsSchema = z.object({
   course_id: z.number().int().positive(),
   sources: z.array(z.enum(['modules', 'files', 'courseresource', 'external', 'modulebuilder', 'announcements'])).nonempty().optional(),
+  resolve_external: z.boolean().optional().default(false),
 });
 
+const AcquisitionFields = {
+  asset_kind: z.enum(['document', 'video', 'interactive', 'unresolved']).optional(),
+  downloadable: z.boolean().optional(),
+  acquisition_policy: z.enum(['download', 'exclude', 'needs_resolution', 'not_open']).optional(),
+  resolution_reason: z.string().max(512).optional(),
+  module_name: z.string().max(512).optional(),
+  external_url: z.string().url().nullable().optional(),
+  locked_for_user: z.boolean().optional(),
+  unlock_at: z.string().nullable().optional(),
+};
+
 const GetDownloadFileSchema = z.object({
+  ...AcquisitionFields,
   file_id: z.string().min(1).max(256),
   course_id: z.number().int().positive(),
   url: z.string().url().nullable().optional(),  // null for courseresource files (Playwright download)
   display_name: z.string().min(1).max(512),
   type: z.string().min(1).max(256).optional(),
+  source: z.string().min(1).max(64).optional(),
   is_playwright_required: z.boolean().optional(),
   is_playright_required: z.boolean().optional(),
 });
@@ -140,6 +154,7 @@ const SearchDownloadsSchema = z.object({
 const DownloadBatchSchema = z.object({
   course_id: z.number().int().positive(),
   materials: z.array(z.object({
+    ...AcquisitionFields,
     file_id: z.string().min(1).max(256),
     url: z.string().url().nullable().optional(),
     display_name: z.string().min(1).max(512),
@@ -427,7 +442,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_get_materials',
-        description: '[네트워크] 강의 자료 목록/메타데이터를 가져옵니다 (모듈, 파일함, 강의자료실, 외부도구). 강의자료는 주차학습(modulebuilder), LearningX 강의자료실(courseresource), 공지 첨부(announcements), Canvas 모듈/외부 링크(modules/external)에 분산될 수 있으므로 한 source에서 자료를 찾았어도 다른 source를 생략하지 말고 결과를 합쳐 확인합니다. 같은 자료가 여러 source에서 발견되면 하나로 합치고 대표 source와 모든 출처 sources를 반환합니다. 제목만 같은 서로 다른 항목은 합치지 않습니다. 권장 1차 조회는 modulebuilder, courseresource, announcements, modules, external이며, Canvas 기본 파일함(files)은 Files 탭이 노출되거나 사용자가 명시적으로 요청한 경우에만 마지막으로 조회합니다. 중앙대 학생 계정에서 files 401은 권한 거부일 수 있으므로 토큰 만료로 보고 재로그인하지 않습니다. 주차학습이 아직 시작되지 않은 항목은 자료 목록에서 제외하며 `not_open` placeholder URL은 반환하지 않습니다. 이 도구는 파일 본문을 다운로드하거나 ChatGPT에 첨부하지 않습니다. 파일은 eclass_download_file/eclass_download_materials_batch로 MCP 서버 로컬 캐시에 받은 뒤, ChatGPT가 읽어야 하면 eclass_file_handoff로 공개 /files/<token> URL을 별도 발급해야 합니다. 반환값은 { ok, course_id, sources, materials, errors, warnings } JSON 객체이며, 일부 source 실패 시 성공한 자료와 실패 정보를 함께 반환합니다.',
+        description: '[네트워크] 강의 자료 목록/메타데이터를 가져옵니다 (모듈, 파일함, 강의자료실, 외부도구). 강의자료는 주차학습(modulebuilder), LearningX 강의자료실(courseresource), 공지 첨부(announcements), Canvas 모듈/외부 링크(modules/external)에 분산될 수 있으므로 한 source에서 자료를 찾았어도 다른 source를 생략하지 말고 결과를 합쳐 확인합니다. 같은 자료가 여러 source에서 발견되면 하나로 합치고 대표 source와 모든 출처 sources를 반환합니다. 제목만 같은 서로 다른 항목은 합치지 않습니다. 권장 1차 조회는 modulebuilder, courseresource, announcements, modules, external이며, Canvas 기본 파일함(files)은 Files 탭이 노출되거나 사용자가 명시적으로 요청한 경우에만 마지막으로 조회합니다. 중앙대 학생 계정에서 files 401은 권한 거부일 수 있으므로 토큰 만료로 보고 재로그인하지 않습니다. modulebuilder의 not_open placeholder URL은 제외합니다. Canvas 잠금 항목은 acquisition_policy=not_open으로 반환합니다. 모든 항목에 asset_kind/downloadable/acquisition_policy/resolution_reason/fingerprint를 반환하며 downloadable=true와 acquisition_policy=download인 항목만 파일 도구에 전달합니다. ExternalTool은 모듈명으로 분류하지 않으며 resolve_external=true이면 미확인 래퍼를 LTI로 추가 확인합니다. 이 도구는 파일 본문을 다운로드하거나 ChatGPT에 첨부하지 않습니다. 파일은 eclass_download_file/eclass_download_materials_batch로 MCP 서버 로컬 캐시에 받은 뒤, ChatGPT가 읽어야 하면 eclass_file_handoff로 공개 /files/<token> URL을 별도 발급해야 합니다. 반환값은 { ok, course_id, sources, materials, errors, warnings } JSON 객체이며, 일부 source 실패 시 성공한 자료와 실패 정보를 함께 반환합니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -438,13 +453,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               minItems: 1,
               description: '가져올 소스. 생략 시 modulebuilder, courseresource, announcements, modules, external을 조회한다. files는 Files 탭이 보이거나 명시적 요청이 있을 때 마지막으로 별도 조회한다.',
             },
+            resolve_external: { type: 'boolean', default: false, description: '미확인 ExternalTool을 LTI로 확인합니다. 파일을 저장하지 않으며 동일 메타데이터의 비재시도 결과는 SQLite에 보존합니다.' },
           },
           required: ['course_id'],
         },
       },
       {
         name: 'eclass_download_file',
-        description: '[네트워크] 강의 파일을 MCP 서버 로컬 디스크/캐시에 다운로드합니다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 local_path/file_id 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 반환된 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. 이미 다운로드된 파일은 건너뜁니다. 동영상은 eclass_download_video를 사용하세요.',
+        description: '[네트워크] 강의 파일을 MCP 서버 로컬 디스크/캐시에 다운로드합니다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 local_path/file_id 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 반환된 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. 과목과 원본 ID가 일치하는 캐시 파일은 건너뜁니다. acquisition_policy/downloadable을 함께 전달하세요. 동영상/interactive/미확인/잠김은 정상 제외 상태로 반환하며 실제 실패만 isError=true와 JSON error_code/retryable을 반환합니다. 동영상은 eclass_download_video를 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -453,6 +469,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             url: { type: 'string', description: '다운로드 URL (courseresource 파일은 null 허용 — Playwright로 다운로드)' },
             display_name: { type: 'string', description: '저장할 파일명' },
             type: { type: 'string', description: '자료 유형. ExternalTool은 LTI 런치 후 실제 파일을 찾습니다. mp4/video/m3u8 계열은 파일 도구에서 거부되며 eclass_download_video 대상입니다.' },
+            asset_kind: { type: 'string', enum: ['document', 'video', 'interactive', 'unresolved'] },
+            downloadable: { type: 'boolean' },
+            acquisition_policy: { type: 'string', enum: ['download', 'exclude', 'needs_resolution', 'not_open'] },
+            resolution_reason: { type: 'string' },
+            source: { type: 'string' },
+            module_name: { type: 'string' },
+            external_url: { type: ['string', 'null'] },
+            locked_for_user: { type: 'boolean' },
+            unlock_at: { type: ['string', 'null'] },
             is_playwright_required: { type: 'boolean', description: 'true면 eclass3 래퍼 URL이어도 ExternalTool LTI 런치로 처리합니다.' },
             is_playright_required: { type: 'boolean', description: 'is_playwright_required의 이전 오탈자 별칭. 둘 중 하나면 런치 경로를 탑니다.' },
           },
@@ -461,7 +486,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_download_materials_batch',
-        description: '[네트워크] 여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드합니다 (부분 성공 지원). 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 file_id/local_path 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 각 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. eclass_get_materials가 반환한 materials 항목을 그대로 전달하면 됩니다. 동영상 자료는 eclass_download_video로 별도 처리합니다.',
+        description: '[네트워크] 여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드합니다 (부분 성공 지원). 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 file_id/local_path 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 각 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. eclass_get_materials의 id/title을 file_id/display_name으로 매핑하고 분류·source·잠금 필드를 함께 전달하세요. 동영상 자료는 eclass_download_video로 별도 처리합니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -474,8 +499,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   file_id: { type: 'string' },
                   url: { type: 'string', description: 'null/생략 시 courseresource(Playwright) 경로' },
                   display_name: { type: 'string' },
-                  type: { type: 'string', description: 'ExternalTool이면 LTI 런치. mp4/video 계열은 파일 도구에서 실패 처리되며 eclass_download_video 대상' },
+                  type: { type: 'string', description: 'ExternalTool이면 LTI 런치. mp4/video 계열은 excluded_video로 정상 제외되며 eclass_download_video 대상' },
                   source: { type: 'string', description: '자료 출처 (캐시에 기록됨)' },
+                  asset_kind: { type: 'string', enum: ['document', 'video', 'interactive', 'unresolved'] },
+                  downloadable: { type: 'boolean' },
+                  acquisition_policy: { type: 'string', enum: ['download', 'exclude', 'needs_resolution', 'not_open'] },
+                  resolution_reason: { type: 'string' },
+                  module_name: { type: 'string' },
+                  external_url: { type: ['string', 'null'] },
+                  locked_for_user: { type: 'boolean' },
+                  unlock_at: { type: ['string', 'null'] },
                   is_playwright_required: { type: 'boolean' },
                   is_playright_required: { type: 'boolean', description: 'is_playwright_required 오탈자 별칭' },
                 },
@@ -757,6 +790,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           parsed.course_id,
           parsed.sources as MaterialSource[] | undefined,
           fileCache,
+          { resolveExternal: parsed.resolve_external },
         );
         return {
           isError: isGetMaterialsToolError(result),
@@ -770,21 +804,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const outcome = await downloadOne(
           { session, fileCache, token: client.getToken() },
-          {
-            file_id: parsed.file_id,
-            course_id: parsed.course_id,
-            url: parsed.url ?? null,
-            display_name: parsed.display_name,
-            type: parsed.type,
-            is_playwright_required: parsed.is_playwright_required,
-            is_playright_required: parsed.is_playright_required,
-          },
+          { ...parsed, url: parsed.url ?? null },
         );
 
         if (outcome.status === 'failed') {
           return {
             isError: true,
-            content: [{ type: 'text', text: `${outcome.message} (file_id=${outcome.file_id}, display_name=${outcome.display_name})` }],
+            content: [{ type: 'text', text: JSON.stringify({ ok: false, ...outcome }) }],
           };
         }
 
@@ -793,12 +819,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: 'text',
             text: JSON.stringify({
+              ok: true,
+              ...outcome,
               file_id: outcome.file_id,
               display_name: outcome.display_name,
               local_path: outcome.local_path,
               size_bytes: outcome.size_bytes,
               skipped: outcome.status === 'skipped',
-              handoff_note: LOCAL_FILE_HANDOFF_NOTE,
+              ...(outcome.local_path ? { handoff_note: LOCAL_FILE_HANDOFF_NOTE } : {}),
             }),
           }],
         };

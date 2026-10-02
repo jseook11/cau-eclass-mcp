@@ -1,5 +1,11 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+
+/** Equal display names must never make distinct source IDs share file bytes. */
+export function materialStorageKey(fileId: string): string {
+  return createHash('sha256').update(fileId).digest('hex');
+}
 
 export function expandTilde(p: string): string {
   return p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p;

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { expandTilde } from './utils.js';
+import type { MaterialAcquisition } from './material-acquisition.js';
 
 const DB_PATH = process.env.ECLASS_DB_PATH ?? '~/.eclass-mcp/files.db';
 
@@ -35,13 +36,27 @@ export interface ResolvedLocator {
   resolved_type?: string | null;
   display_name?: string | null;
   resolved_at: string;
+  fingerprint?: string | null;
+}
+
+export interface MaterialResolution extends MaterialAcquisition {
+  course_id: number;
+  file_id: string;
+  fingerprint: string;
+  reason?: string;
+  error_code?: string;
+  retryable: boolean;
+  resolved_url?: string;
+  resolved_type?: string;
+  resolved_name?: string;
+  observed_at: string;
+  attempt?: number;
 }
 
 export class FileCache {
   private db: Database.Database;
 
-  constructor() {
-    const dbPath = expandTilde(DB_PATH);
+  constructor(dbPath = expandTilde(DB_PATH)) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
@@ -77,6 +92,14 @@ export class FileCache {
         resolved_type TEXT,
         display_name  TEXT,
         resolved_at   TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS material_resolutions (
+        course_id INTEGER NOT NULL,
+        file_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (course_id, file_id, fingerprint)
       )
     `);
 
@@ -85,6 +108,8 @@ export class FileCache {
     if (!columns.some((c) => c.name === 'source')) {
       this.db.exec(`ALTER TABLE downloaded_files ADD COLUMN source TEXT`);
     }
+    const locatorColumns = this.db.prepare('PRAGMA table_info(resolved_locators)').all() as Array<{ name: string }>;
+    if (!locatorColumns.some((column) => column.name === 'fingerprint')) this.db.exec('ALTER TABLE resolved_locators ADD COLUMN fingerprint TEXT');
 
     // Migration: legacy catalog entries remain available for exact course-name
     // lookups, but are not considered a current-semester snapshot until the
@@ -97,6 +122,20 @@ export class FileCache {
 
   getDb(): Database.Database {
     return this.db;
+  }
+
+  getMaterialResolution(courseId: number, fileId: string, fingerprint: string): MaterialResolution | undefined {
+    const row = this.db.prepare('SELECT data_json, attempt FROM material_resolutions WHERE course_id = ? AND file_id = ? AND fingerprint = ?')
+      .get(courseId, fileId, fingerprint) as { data_json: string; attempt: number } | undefined;
+    return row ? { ...JSON.parse(row.data_json), attempt: row.attempt } : undefined;
+  }
+
+  setMaterialResolution(entry: MaterialResolution): void {
+    this.db.prepare(`INSERT INTO material_resolutions (course_id, file_id, fingerprint, data_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(course_id, file_id, fingerprint) DO UPDATE SET
+        data_json = excluded.data_json, attempt = material_resolutions.attempt + 1`)
+      .run(entry.course_id, entry.file_id, entry.fingerprint, JSON.stringify(entry));
   }
 
   has(fileId: string): boolean {
@@ -233,7 +272,7 @@ export class FileCache {
   getResolvedLocator(fileId: string): ResolvedLocator | undefined {
     return this.db
       .prepare(`
-        SELECT file_id, course_id, resolved_url, resolved_type, display_name, resolved_at
+        SELECT file_id, course_id, resolved_url, resolved_type, display_name, resolved_at, fingerprint
         FROM resolved_locators
         WHERE file_id = ?
       `)
@@ -243,8 +282,8 @@ export class FileCache {
   setResolvedLocator(entry: ResolvedLocator): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO resolved_locators
-        (file_id, course_id, resolved_url, resolved_type, display_name, resolved_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+        (file_id, course_id, resolved_url, resolved_type, display_name, resolved_at, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.file_id,
       entry.course_id,
@@ -252,6 +291,7 @@ export class FileCache {
       entry.resolved_type ?? null,
       entry.display_name ?? null,
       entry.resolved_at,
+      entry.fingerprint ?? null,
     );
   }
 }

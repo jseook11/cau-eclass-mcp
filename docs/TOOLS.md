@@ -278,7 +278,7 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
 
 강의 자료 목록/메타데이터 조회. 여러 source를 병렬 수집하며 일부 실패해도 성공분은 반환 (partial success). 파일 본문을 다운로드하거나 ChatGPT에 첨부하지 않는다.
 
-- 입력: `{ course_id: number, sources?: ('modules'|'files'|'courseresource'|'external'|'modulebuilder'|'announcements')[] }`
+- 입력: `{ course_id: number, sources?: ('modules'|'files'|'courseresource'|'external'|'modulebuilder'|'announcements')[], resolve_external?: boolean = false }`
   - 자료는 `modulebuilder`(주차학습), `courseresource`(강의자료실), `announcements`(공지 첨부),
     `modules`/`external`(보조 링크), `files`(Canvas 기본 파일함)에 분산될 수 있다.
     한 source에서 자료를 찾았어도 다른 source를 생략하지 않고 결과를 합친다.
@@ -294,7 +294,10 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - `courseresource`는 LearningX HTTP/API를 먼저 시도하고 실패 시 Playwright 인터셉트로
     폴백한다. `modulebuilder`는 아직 Playwright를 사용한다.
 - 출력: `{ ok, course_id, sources: { requested, succeeded, failed }, materials, errors, warnings }`
-  - material: `{ id, canvas_file_id?, title, type, url, source, sources?, url_source?, module_name?, is_playwright_required?, is_playright_required?, is_downloaded?, local_path? }`
+  - material: `{ id, canvas_file_id?, title, type, url, source, asset_kind, downloadable, acquisition_policy, resolution_reason, fingerprint, sources?, url_source?, module_name?, is_playwright_required?, is_playright_required?, is_downloaded?, local_path? }`
+  - `asset_kind`은 document/video/interactive/unresolved이고 `acquisition_policy`는 download/exclude/needs_resolution/not_open이다. 파일 다운로드는 `downloadable: true` 및 `acquisition_policy: download`인 항목에만 수행한다. ExternalTool, 모듈명, 제목 또는 일반 OCS viewer URL만으로 문서/영상이라고 추정하지 않는다.
+  - `resolve_external: true`는 미확인 ExternalTool을 선택적으로 LTI 확인하며 파일을 저장하지 않는다. `resolution_retryable`/`resolution_error_code`/`resolution_debug`로 확인 실패를 구분한다. 같은 fingerprint의 비재시도 결과는 SQLite에서 재사용한다. 자세한 Collector 연동 규칙은 [ExternalTool acquisition contract](EXTERNAL_TOOL_ACQUISITION.md)를 참조한다.
+  - Canvas의 잠금 및 미래 unlock_at은 `not_open`으로 반환하고 LTI 확인을 하지 않는다.
   - 동일 source의 같은 ID, 동일 OCS 콘텐츠 URL, Canvas file URL 별칭, 같은 주차학습/외부도구 module item은 하나로 합친다. `source`는 의미 우선순위가 가장 높은 대표 출처이고, `sources`에는 합쳐진 모든 출처를 보존한다. 제목만 같은 서로 다른 ID는 합치지 않는다.
   - Canvas File module item은 `content_id`를 `canvas_file_id`로 보존해 module-item URL만 있어도 `files`/`announcements` 별칭과 합친다. 병합 후 `url`/`type`은 영상이면 OCS URL, 일반 파일이면 직접 다운로드 URL을 우선하며, URL 제공자가 대표 `source`와 다르면 `url_source`에 기록한다.
   - `modules`와 `external`을 함께 요청해도 공통 Canvas modules API는 한 번만 호출하고 결과를 유형별로 나눈다.
@@ -306,14 +309,16 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
 
 ### eclass_download_file
 
-파일 1개를 MCP 서버 로컬 디스크/캐시에 다운로드. `eclass_get_materials` 결과 중 비동영상 파일 항목을 넘긴다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않는다.
+파일 1개를 MCP 서버 로컬 디스크/캐시에 다운로드. `eclass_get_materials` 결과 중 `downloadable: true`이고 `acquisition_policy: download`인 항목을 넘긴다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않는다.
 
 - 입력: `{ file_id: string, course_id: number, url: string | null, display_name: string, type?: string, is_playwright_required?: boolean, is_playright_required?: boolean }`
+  - `asset_kind`, `downloadable`, `acquisition_policy`, `resolution_reason`, `source`, `module_name`, `external_url`, `locked_for_user`, `unlock_at`도 전달할 수 있다. `id → file_id`, `title → display_name`을 매핑한다.
   - `url`이 null이거나 `ocs.cau.ac.kr/em/` 뷰어 URL이면 Playwright 경로로 자동 처리.
   - `type`이 `ExternalTool`이거나 `is_playwright_required`/`is_playright_required`가 true이면 Canvas 모듈 래퍼 URL을 LTI 런치(`external_tool_launch`)로 연 뒤 실제 파일을 찾는다. `is_playright_required`는 오탈자 별칭이다.
   - `type`이 영상 계열(mp4/m3u8/video 등)이면 파일 도구에서 거부된다. OCS MP4 동영상은 `eclass_download_video`를 사용한다.
-- 출력: `{ file_id, display_name, local_path, size_bytes, skipped, handoff_note }` — `skipped: true`면 캐시 히트로 다운로드 생략.
-- 저장 위치: `~/Downloads/eclass/{course_id}/` (env `ECLASS_DOWNLOAD_DIR`로 변경 가능).
+- 출력: `{ ok, file_id, display_name, status, strategy, local_path?, size_bytes?, skipped, handoff_note?, error_code?, message?, retryable?, next_action?, failure_kind? }` — `skipped: true`면 캐시 히트로 다운로드 생략. 실패도 JSON으로 반환한다.
+  - `excluded_video`, `excluded_interactive`, `not_downloadable`, `needs_resolution`, `not_open`은 정상 비파일 결과이며 local_path가 없다. `EXTERNAL_TOOL_NO_ARTIFACT`는 `needs_resolution`, `retryable: false`로 반환한다. 실제 `failed`는 `failure_kind`로 재시도/terminal을 구분한다.
+- 새 파일 저장 위치: `~/Downloads/eclass/{course_id}/{source_id_hash}/` (env `ECLASS_DOWNLOAD_DIR`로 변경 가능). 다른 ID의 같은 파일명을 덮어쓰지 않는다. 기존 경로의 캐시도 계속 조회한다.
 - 내부적으로 url/type에 따라 DownloadStrategy를 결정한다 (아래 "다운로드 전략" 참조).
 - ChatGPT가 파일 내용을 읽어야 하면 반환된 `file_id`로 `eclass_file_handoff`를 호출해 공개 `/files/<token>` URL을 별도 발급하고, 그 URL을 브라우징으로 직접 연다.
 
@@ -324,9 +329,9 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - 입력: `{ course_id: number, materials: [{ file_id, url?, display_name, type?, source?, is_playwright_required?, is_playright_required? }], continue_on_error?: boolean = true }`
   - `continue_on_error: false`면 첫 실패에서 중단.
   - 다운로드는 순차 처리 (eclass 부담·공유 Playwright 세션 안정성 때문).
-  - 영상 계열 type은 실패 항목으로 반환되며 `eclass_download_video` 사용을 안내한다.
-- 출력: `{ ok, course_id, summary: { total, downloaded, skipped, failed }, results: [DownloadOutcome], handoff_note }`
-  - DownloadOutcome: `{ file_id, display_name, status: 'downloaded'|'skipped'|'failed', strategy, local_path?, size_bytes?, error_code?, message?, retryable? }`
+  - 단일 도구와 같은 분류·잠금 필드를 전달한다. 영상·interactive·미확인·잠김은 실패로 집계하지 않는다.
+- 출력: `{ ok, course_id, summary: { total, downloaded, skipped, failed, excluded, needs_resolution, not_open }, results: [DownloadOutcome], handoff_note }`
+  - DownloadOutcome: `{ file_id, display_name, status: 'downloaded'|'skipped'|'failed'|'excluded_video'|'excluded_interactive'|'not_downloadable'|'needs_resolution'|'not_open', strategy, local_path?, size_bytes?, error_code?, message?, retryable?, next_action?, failure_kind? }`
   - `ok: false`는 실패 항목이 하나라도 있음을 의미.
 - `source`를 넘기면 캐시 DB에 기록되어 이후 `eclass_search_downloads`의 source 필터로 검색 가능.
 - ChatGPT가 파일 내용을 읽어야 하면 각 `results[].file_id`로 `eclass_file_handoff`를 호출해 공개 `/files/<token>` URL을 별도 발급하고, 그 URL을 브라우징으로 직접 연다.
@@ -392,13 +397,13 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 
 ## 다운로드 전략 (DownloadStrategy)
 
-`eclass_download_file`/`eclass_download_materials_batch`는 항목의 `url`/`type`/런치 플래그를 보고 처리 방식을 자동 결정한다 (`src/download-strategy.ts`). 타입과 `is_playwright_required`가 URL 호스트보다 우선한다.
+`eclass_download_file`/`eclass_download_materials_batch`는 acquisition 계약과 잠금/비파일 유형을 먼저 확인한 뒤, 허용된 자료의 `url`/`type`/런치 플래그로 전송 방식을 결정한다 (`src/download-strategy.ts`).
 
 | strategy | 조건 | 처리 |
 |---|---|---|
-| `already_cached` | 캐시 히트 (file_id, 또는 파일명+크기+존재) | 다운로드 생략 (skipped) |
-| `unsupported_streaming_media` | 파일 다운로드 도구에 type이 mp4/m3u8/video 등으로 들어옴 | 실패 처리 (`DOWNLOAD_UNSUPPORTED_MEDIA`), `eclass_download_video` 안내 |
-| `external_tool_launch` | `type === 'ExternalTool'` 또는 `is_playwright_required`/`is_playright_required` | Playwright로 `/modules/items/{id}` LTI를 따라가 PDF/PPT/PPTX/OCS URL을 찾는다. LearningX 게시판이면 첫 게시물을 열어 Canvas 첨부파일까지 찾은 뒤, OCS면 `ocs_intercept`, 파일이면 직접 다운로드한다. 해결된 locator는 캐시되어 배치에서 재사용 |
+| `already_cached` | 과목과 source-native ID가 일치하는 파일 캐시 히트 | 다운로드 생략 (skipped) |
+| `unsupported_streaming_media` | 파일 다운로드 도구에 type이 mp4/m3u8/video 등으로 들어옴 | 정상 제외 (`excluded_video`) |
+| `external_tool_launch` | `type === 'ExternalTool'` 또는 `is_playwright_required`/`is_playright_required` | LTI를 따라 실제 파일/영상 근거를 확인한다. 일반 OCS viewer만 발견하면 needs_resolution으로 남긴다. 확인된 문서만 다운로드하며 locator는 과목/fingerprint가 일치할 때 재사용 |
 | `ocs_intercept` | url이 `ocs.cau.ac.kr/em/` 뷰어 | Playwright로 파일 응답 인터셉트 |
 | `playwright_ui` | url 없음 (courseresource) | Playwright LTI 경로 |
 | `canvas_file` | url이 `eclass3.cau.ac.kr` (ExternalTool 래퍼 제외) | 토큰으로 직접 fetch (리다이렉트 추적) |
@@ -406,11 +411,11 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 
 동영상 다운로드는 위 파일 DownloadStrategy와 별개로 `eclass_download_video`에서 `ocs_uniplayer_mp4` 전략을 사용한다.
 
-캐시 검증은 `file_id` → (`course_id`+파일명+크기+디스크 존재) 순으로 확인하며, 파일명·크기가 같으면 새 `file_id`를 같은 파일에 재연결한다.
+캐시 검증은 source-native `file_id`, 과목, 알려진 source와 디스크 존재를 확인한다. 파일명·로컬 크기만으로 다른 ID를 같은 파일에 재연결하지 않는다.
 
 ## 자주 쓰는 조합 흐름
 
-- **새 파일 자료 받기**: `eclass_get_courses_cached` → course_id 선택 → `eclass_get_materials` → 동영상이 아닌 `is_downloaded: false` 항목들을 `eclass_download_materials_batch`에 한 번에 넘김 (각 material의 `source`·`type`·`is_playwright_required`도 같이 넘기면 ExternalTool 래퍼가 Canvas 파일로 오인되지 않음).
+- **새 파일 자료 받기**: `eclass_get_courses_cached` → course_id 선택 → `eclass_get_materials` → `downloadable: true`, `acquisition_policy: download`, `is_downloaded: false` 항목들을 `eclass_download_materials_batch`에 넘김 (`id → file_id`, `title → display_name` 매핑 후 분류·source·잠금·런치 필드를 함께 전달).
 - **동영상 받기**: `eclass_get_materials`에서 `type`이 mp4/video 계열이고 `url`이 `https://ocs.cau.ac.kr/em/...`인 항목 선택 → `eclass_download_video`.
 - **마감 임박 과제 확인**: `eclass_get_assignments { days_ahead: 7, include_submitted: false }`.
 - **문제 진단**: 툴 오류 발생 → `eclass_doctor` → 실패 check의 detail로 원인 판단 (인증이면 `pnpm run setup` 재실행 안내).

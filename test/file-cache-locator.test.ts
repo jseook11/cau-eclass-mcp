@@ -32,6 +32,7 @@ test('FileCache stores and reuses a resolved ExternalTool locator', async () => 
       resolved_type: 'pdf',
       display_name: 'week1.pdf',
       resolved_at: '2026-09-01T00:00:00.000Z',
+      fingerprint: null,
     });
 
     assert.deepEqual(cache.getResolvedLocator('3707021'), {
@@ -41,6 +42,7 @@ test('FileCache stores and reuses a resolved ExternalTool locator', async () => 
       resolved_type: 'pdf',
       display_name: 'week1.pdf',
       resolved_at: '2026-09-01T00:00:00.000Z',
+      fingerprint: null,
     });
   });
 });

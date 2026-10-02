@@ -8,7 +8,8 @@ import {
   type DownloadStrategy,
 } from '../download-strategy.js';
 import { downloadFileToDisk, validateCachedDownload } from './download-file.js';
-import { sanitizeDebug, isRetryableReason } from '../errors.js';
+import { acquisitionError, acquisitionStatus, classifyMaterial, AcquisitionError, materialFingerprint, type MaterialAcquisition, type AcquisitionStatus } from '../material-acquisition.js';
+import { resolveMaterial } from '../resolve-material.js';
 import { sanitizeFileName } from '../utils.js';
 import {
   isCanvasModuleItemUrl,
@@ -16,7 +17,7 @@ import {
   isOcsViewerUrl,
 } from '../external-tool-launch.js';
 
-export interface DownloadItem {
+export interface DownloadItem extends Partial<MaterialAcquisition> {
   file_id: string;
   course_id: number;
   url: string | null;
@@ -25,18 +26,24 @@ export interface DownloadItem {
   source?: string | null;
   is_playwright_required?: boolean;
   is_playright_required?: boolean;
+  external_url?: string | null;
+  module_name?: string;
+  locked_for_user?: boolean;
+  unlock_at?: string | null;
 }
 
 export interface DownloadOutcome {
   file_id: string;
   display_name: string;
-  status: 'downloaded' | 'skipped' | 'failed';
+  status: 'downloaded' | 'skipped' | 'failed' | AcquisitionStatus;
   strategy: DownloadStrategy;
   local_path?: string;
   size_bytes?: number;
   error_code?: string;
   message?: string;
   retryable?: boolean;
+  next_action?: string;
+  failure_kind?: 'failed_retryable' | 'failed_terminal';
 }
 
 export interface DownloadDeps {
@@ -60,7 +67,14 @@ function failed(
   message: string,
   retryable: boolean,
 ): DownloadOutcome {
-  return { file_id: item.file_id, display_name: item.display_name, status: 'failed', strategy, error_code: errorCode, message, retryable };
+  return { file_id: item.file_id, display_name: item.display_name, status: 'failed', strategy, error_code: errorCode, message, retryable,
+    failure_kind: retryable ? 'failed_retryable' : 'failed_terminal', next_action: retryable ? 'retry_with_backoff' : 'none' };
+}
+
+function excluded(item: DownloadItem, strategy: DownloadStrategy, status: AcquisitionStatus, reason?: string, errorCode?: string): DownloadOutcome {
+  return { file_id: item.file_id, display_name: item.display_name, strategy, status, retryable: false,
+    ...(reason ? { message: reason } : {}), ...(errorCode ? { error_code: errorCode } : {}),
+    next_action: status === 'needs_resolution' ? 'resolve_material' : status === 'not_open' ? 'wait_until_open' : 'none' };
 }
 
 function rememberLocator(cache: FileCache, locator: ResolvedLocator): void {
@@ -73,15 +87,17 @@ async function resolveExternalToolLocator(deps: DownloadDeps, item: DownloadItem
   const cached = typeof deps.fileCache.getResolvedLocator === 'function'
     ? deps.fileCache.getResolvedLocator(item.file_id)
     : undefined;
-  if (cached?.resolved_url) return cached;
+  if (cached?.resolved_url && cached.course_id === item.course_id && cached.fingerprint === materialFingerprint(item)) return cached;
 
   const currentUrl = item.url;
-  if (currentUrl && isOcsViewerUrl(currentUrl)) {
+  const knownDocument = classifyMaterial(item).asset_kind === 'document'
+    || (item.asset_kind === 'document' && item.downloadable === true && item.acquisition_policy === 'download');
+  if (knownDocument && currentUrl && isOcsViewerUrl(currentUrl)) {
     const locator: ResolvedLocator = {
       file_id: item.file_id,
       course_id: item.course_id,
       resolved_url: currentUrl,
-      resolved_type: 'ocs',
+      resolved_type: item.type === 'ExternalTool' ? 'pdf' : item.type ?? 'ocs',
       display_name: item.display_name,
       resolved_at: new Date().toISOString(),
     };
@@ -89,7 +105,7 @@ async function resolveExternalToolLocator(deps: DownloadDeps, item: DownloadItem
     return locator;
   }
 
-  if (currentUrl && !isCanvasModuleItemUrl(currentUrl) && !/\/external_tools\//.test(currentUrl)) {
+  if (knownDocument && currentUrl && !isCanvasModuleItemUrl(currentUrl) && !/\/external_tools\//.test(currentUrl)) {
     const locator: ResolvedLocator = {
       file_id: item.file_id,
       course_id: item.course_id,
@@ -106,14 +122,21 @@ async function resolveExternalToolLocator(deps: DownloadDeps, item: DownloadItem
     throw new Error('ExternalTool launch requires a module item URL');
   }
 
-  const artifact = await deps.session.resolveExternalToolLaunch(item.course_id, currentUrl);
+  const resolution = await resolveMaterial(deps.session, deps.fileCache, item.course_id, item);
+  if (resolution.error_code && resolution.error_code !== 'EXTERNAL_TOOL_NO_ARTIFACT') {
+    throw new AcquisitionError(resolution.error_code, resolution.reason ?? resolution.resolution_reason, resolution.retryable);
+  }
+  if (resolution.retryable) throw new AcquisitionError(resolution.error_code ?? 'DOWNLOAD_FAILED', resolution.reason ?? resolution.resolution_reason, true);
+  const status = acquisitionStatus(resolution);
+  if (status) throw new AcquisitionError(status === 'excluded_video' ? 'EXTERNAL_TOOL_VIDEO' : 'EXTERNAL_TOOL_NO_ARTIFACT', resolution.reason ?? resolution.resolution_reason, false);
   const locator: ResolvedLocator = {
     file_id: item.file_id,
     course_id: item.course_id,
-    resolved_url: artifact.url,
-    resolved_type: artifact.type ?? null,
-    display_name: artifact.filename ?? item.display_name,
+    resolved_url: resolution.resolved_url!,
+    resolved_type: resolution.resolved_type ?? null,
+    display_name: resolution.resolved_name ?? item.display_name,
     resolved_at: new Date().toISOString(),
+    fingerprint: materialFingerprint(item),
   };
   rememberLocator(deps.fileCache, locator);
   return locator;
@@ -129,7 +152,7 @@ async function downloadResolved(
 ): Promise<{ localPath: string; sizeBytes: number }> {
   const transport = resolveDownloadStrategy(
     resolvedUrl,
-    resolvedType === 'ocs' ? 'pdf' : resolvedType,
+    resolvedType,
     false,
   );
   if (transport === 'unsupported_streaming_media') {
@@ -148,7 +171,7 @@ async function downloadResolved(
     const stat = await fs.stat(localPath);
     return { localPath, sizeBytes: stat.size };
   }
-  const result = await downloadFileToDisk(item.course_id, resolvedUrl, displayName, deps.token);
+  const result = await downloadFileToDisk(item.course_id, resolvedUrl, displayName, deps.token, item.file_id);
   return { localPath: result.local_path, sizeBytes: result.size_bytes };
 }
 
@@ -156,7 +179,7 @@ async function downloadResolved(
  * Unified single-material download. Validates the cache, resolves the transport
  * strategy, dispatches to the direct-fetch or Playwright path, records the
  * result with its source, and returns a structured outcome. Never throws for
- * expected failures — they come back as status 'failed'.
+ * expected failures or exclusions. Only actual failures use status 'failed'.
  */
 export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promise<DownloadOutcome> {
   const strategy = resolveDownloadStrategy(
@@ -165,17 +188,30 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
     isExternalToolLaunchRequested(item),
   );
 
-  if (strategy === 'unsupported_streaming_media') {
-    return failed(
-      item,
-      strategy,
-      'DOWNLOAD_UNSUPPORTED_MEDIA',
-      `파일 다운로드 도구는 동영상/스트리밍 자료를 처리하지 않습니다. OCS MP4 동영상은 eclass_download_video를 사용하세요: type=${item.type ?? ''}`,
-      false,
-    );
+  const inferred = classifyMaterial(item);
+  const acquisition: MaterialAcquisition = {
+    asset_kind: item.asset_kind ?? inferred.asset_kind,
+    downloadable: item.downloadable ?? inferred.downloadable,
+    acquisition_policy: item.acquisition_policy ?? inferred.acquisition_policy,
+    resolution_reason: item.resolution_reason ?? inferred.resolution_reason,
+  };
+  // Current lock/video evidence always beats stale caller metadata or a cache hit.
+  const inferredStatus = acquisitionStatus(inferred);
+  if (inferred.acquisition_policy === 'not_open' || inferred.acquisition_policy === 'exclude') {
+    return excluded(item, strategy, inferredStatus!, inferred.resolution_reason);
+  }
+  const status = acquisitionStatus(acquisition);
+  if (status && (item.acquisition_policy !== undefined || item.downloadable === false || item.asset_kind !== undefined)) {
+    return excluded(item, strategy, status, acquisition.resolution_reason);
   }
 
-  const cached = await validateCachedDownload(deps.fileCache, item);
+  if (strategy === 'unsupported_streaming_media') {
+    return excluded(item, strategy, 'excluded_video', 'streaming_media', 'DOWNLOAD_UNSUPPORTED_MEDIA');
+  }
+
+  // Unclassified wrappers must resolve before any download cache can satisfy them.
+  const cached = item.type === 'ExternalTool' && inferred.asset_kind === 'unresolved' && acquisition.asset_kind !== 'document'
+    ? null : await validateCachedDownload(deps.fileCache, item);
   if (cached) {
     return {
       file_id: item.file_id,
@@ -198,6 +234,7 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
 
     if (strategy === 'external_tool_launch') {
       if (!item.url) {
+        if (item.type === 'ExternalTool') return excluded(item, strategy, 'needs_resolution', 'external_tool_url_missing', 'EXTERNAL_TOOL_URL_MISSING');
         localPath = await deps.session.downloadCourseresourceFile(
           item.course_id,
           item.file_id,
@@ -232,7 +269,7 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
       const stat = await fs.stat(localPath);
       sizeBytes = stat.size;
     } else {
-      const result = await downloadFileToDisk(item.course_id, item.url!, item.display_name, deps.token);
+      const result = await downloadFileToDisk(item.course_id, item.url!, item.display_name, deps.token, item.file_id);
       localPath = result.local_path;
       sizeBytes = result.size_bytes;
     }
@@ -256,7 +293,9 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
       size_bytes: sizeBytes,
     };
   } catch (err) {
-    const reason = sanitizeDebug(err instanceof Error ? err.message : String(err)) || 'Unknown error';
-    return failed(item, strategy, 'DOWNLOAD_FAILED', reason, isRetryableReason(reason));
+    const error = acquisitionError(err);
+    if (error.code === 'EXTERNAL_TOOL_NO_ARTIFACT') return excluded(item, strategy, 'needs_resolution', error.reason, error.code);
+    if (error.code === 'EXTERNAL_TOOL_VIDEO') return excluded(item, strategy, 'excluded_video', error.reason, error.code);
+    return failed(item, strategy, error.code, error.reason, error.retryable);
   }
 }

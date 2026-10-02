@@ -1,6 +1,8 @@
 import { CanvasApiError, CanvasClient, isCanvasPermissionDeniedError } from '../canvas-client.js';
 import { BrowserSession, isStreamingMediaType } from '../browser-session.js';
 import { FileCache } from '../file-cache.js';
+import { classifyMaterial, materialFingerprint, type MaterialAcquisition } from '../material-acquisition.js';
+import { resolveMaterial } from '../resolve-material.js';
 
 const BASE_URL = 'https://eclass3.cau.ac.kr';
 
@@ -15,7 +17,7 @@ function resolveMaterialUrl(rawUrl: string | null | undefined): string | null {
   }
 }
 
-export interface Material {
+export interface Material extends Partial<MaterialAcquisition> {
   id: string;
   canvas_file_id?: string;
   title: string;
@@ -27,6 +29,13 @@ export interface Material {
   /** Source that supplied `url` when it differs from the representative source. */
   url_source?: MaterialSource;
   module_name?: string;
+  external_url?: string | null;
+  locked_for_user?: boolean;
+  unlock_at?: string | null;
+  resolution_retryable?: boolean;
+  resolution_error_code?: string;
+  resolution_debug?: string;
+  fingerprint?: string;
   is_playwright_required?: boolean;
   /** @deprecated typo kept for callers that still send the misspelled flag */
   is_playright_required?: boolean;
@@ -65,12 +74,24 @@ interface RawModuleItem {
   title: string;
   type: string;
   html_url?: string | null;
+  external_url?: string | null;
+  content_details?: { locked_for_user?: boolean; unlock_at?: string | null; lock_info?: { unlock_at?: string | null } };
 }
 
 interface RawModule {
   id: number;
   name: string;
   items?: RawModuleItem[];
+  state?: string;
+  unlock_at?: string | null;
+}
+
+function moduleAvailability(module: RawModule, item: RawModuleItem): Pick<Material, 'locked_for_user' | 'unlock_at'> {
+  return {
+    ...(module.state === 'locked' || item.content_details?.locked_for_user ? { locked_for_user: true } : {}),
+    ...(module.unlock_at || item.content_details?.unlock_at || item.content_details?.lock_info?.unlock_at
+      ? { unlock_at: item.content_details?.unlock_at ?? item.content_details?.lock_info?.unlock_at ?? module.unlock_at } : {}),
+  };
 }
 
 interface RawFile {
@@ -171,6 +192,7 @@ async function fetchModules(loadModules: () => Promise<RawModule[]>): Promise<Ma
         url: resolveMaterialUrl(item.html_url),
         source: 'modules',
         module_name: module.name,
+        ...moduleAvailability(module, item),
       });
     }
   }
@@ -278,6 +300,8 @@ async function fetchExternal(loadModules: () => Promise<RawModule[]>): Promise<M
         url: resolveMaterialUrl(item.html_url),
         source: 'external',
         module_name: module.name,
+        ...(item.external_url ? { external_url: resolveMaterialUrl(item.external_url) } : {}),
+        ...moduleAvailability(module, item),
       }, true));
     }
   }
@@ -438,6 +462,8 @@ function mergeMaterialGroup(group: Material[]): Material {
     sources,
     ...(locator.source !== primary.source ? { url_source: locator.source } : {}),
     ...(moduleName ? { module_name: moduleName } : {}),
+    ...(group.some((material) => material.locked_for_user) ? { locked_for_user: true } : {}),
+    ...(group.find((material) => material.unlock_at)?.unlock_at ? { unlock_at: group.find((material) => material.unlock_at)!.unlock_at } : {}),
     ...(group.some((material) => material.is_downloaded !== undefined)
       ? { is_downloaded: Boolean(downloaded) }
       : {}),
@@ -548,6 +574,7 @@ export async function getMaterials(
   courseId: number,
   sources: MaterialSource[] = DEFAULT_SOURCES,
   cache?: FileCache,
+  options: { resolveExternal?: boolean } = {},
 ): Promise<GetMaterialsResult> {
   const requested = uniqueSources(sources);
   if (requested.length === 0) {
@@ -558,7 +585,7 @@ export async function getMaterials(
   const loadModules = (): Promise<RawModule[]> => {
     modulesPromise ??= client.fetchAll<RawModule>(
       `/api/v1/courses/${courseId}/modules`,
-      { 'include[]': 'items', per_page: '50' },
+      { 'include[]': ['items', 'content_details'], per_page: '50' },
     );
     return modulesPromise;
   };
@@ -589,7 +616,7 @@ export async function getMaterials(
     for (const m of materials) {
       try {
         const record = cache.get(m.id);
-        if (record) {
+        if (record && record.course_id === courseId) {
           m.is_downloaded = true;
           m.local_path = record.local_path;
         } else {
@@ -603,6 +630,31 @@ export async function getMaterials(
     if (cacheWarning) warnings.push(cacheWarning);
   }
 
+  const merged = deduplicateMaterials(materials);
+  for (const material of merged) {
+    Object.assign(material, classifyMaterial(material));
+    material.fingerprint = materialFingerprint(material);
+    // Prefer semantic evidence from the source list over a historical launch.
+    if (material.acquisition_policy !== 'needs_resolution' || material.type !== 'ExternalTool') continue;
+    try {
+      const previous = cache?.getMaterialResolution?.(courseId, material.id, material.fingerprint);
+      const resolution = options.resolveExternal && material.url
+        ? await resolveMaterial(session, cache, courseId, material)
+        : previous && !previous.retryable ? previous : undefined;
+      if (!resolution) continue;
+      Object.assign(material, {
+        asset_kind: resolution.asset_kind, downloadable: resolution.downloadable,
+        acquisition_policy: resolution.acquisition_policy, resolution_reason: resolution.resolution_reason,
+        resolution_retryable: resolution.retryable,
+        ...(resolution.error_code ? { resolution_error_code: resolution.error_code } : {}),
+        ...(resolution.reason ? { resolution_debug: resolution.reason } : {}),
+      });
+    } catch (err) {
+      // Cache errors are visible without hiding independently discovered data.
+      if (!warnings.some((warning) => warning.source === 'cache')) warnings.push(toMaterialIssue('cache', err));
+    }
+  }
+
   return {
     ok: succeeded.length > 0,
     course_id: courseId,
@@ -611,7 +663,7 @@ export async function getMaterials(
       succeeded,
       failed,
     },
-    materials: deduplicateMaterials(materials),
+    materials: merged,
     errors,
     warnings,
   };

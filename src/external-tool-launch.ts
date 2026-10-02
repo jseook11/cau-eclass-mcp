@@ -1,3 +1,5 @@
+import { AcquisitionError } from './material-acquisition.js';
+
 export const OCS_VIEWER_MARKER = 'ocs.cau.ac.kr/em/';
 
 export interface LaunchObservation {
@@ -9,7 +11,7 @@ export interface LaunchObservation {
   filename?: string;
 }
 
-export type LaunchArtifactKind = 'ocs_viewer' | 'file';
+export type LaunchArtifactKind = 'ocs_viewer' | 'file' | 'video';
 
 export interface LaunchArtifact {
   kind: LaunchArtifactKind;
@@ -28,6 +30,7 @@ export interface LtiPageSnapshot {
   url: string;
   forms: LtiFormSnapshot[];
   iframes: string[];
+  hasVideo?: boolean;
 }
 
 export type LtiFollowAction =
@@ -117,6 +120,10 @@ function isLikelyHtml(obs: LaunchObservation): boolean {
 }
 
 function scoreObservation(obs: LaunchObservation): { score: number; artifact: LaunchArtifact } | null {
+  if (obs.status !== undefined && obs.status >= 400) return null;
+  if (obs.source === 'response' && /^(video\/|application\/(?:x-mpegurl|vnd\.apple\.mpegurl|dash\+xml))/i.test(obs.contentType ?? '')) {
+    return { score: 950, artifact: { kind: 'video', url: obs.url, type: 'video' } };
+  }
   if (isOcsViewerUrl(obs.url) && (obs.source !== 'response' || isLikelyHtml(obs) || !obs.contentType)) {
     return {
       score: obs.source === 'navigation' || obs.source === 'iframe' || obs.source === 'popup' ? 500 : 450,
@@ -133,7 +140,7 @@ function scoreObservation(obs: LaunchObservation): { score: number; artifact: La
     };
   }
 
-  if (obs.source === 'response' && (obs.status ?? 200) === 200 && !isLikelyHtml(obs)) {
+  if (obs.source === 'response' && (obs.status ?? 200) >= 200 && (obs.status ?? 200) < 300 && !isLikelyHtml(obs)) {
     if (fileType || isAttachment(obs)) {
       return {
         score: slide ? 850 : 700,
@@ -219,10 +226,11 @@ export async function resolveLaunchFromContext(input: LaunchContext): Promise<La
 
   for (let step = 0; step < maxSteps; step += 1) {
     const artifact = selectLaunchArtifact(allObservations());
-    if (artifact) return artifact;
+    if (artifact && artifact.kind !== 'ocs_viewer') return artifact;
 
     const snapshot = await input.readSnapshot();
     extra.push({ source: 'navigation', url: snapshot.url });
+    if (snapshot.hasVideo) return { kind: 'video', url: snapshot.url, type: 'video' };
 
     if (!boardAttachmentChecked && input.resolveBoardAttachment) {
       const attachment = await input.resolveBoardAttachment();
@@ -262,6 +270,12 @@ export async function resolveLaunchFromContext(input: LaunchContext): Promise<La
   }
 
   const artifact = selectLaunchArtifact(allObservations());
+  if (artifact && artifact.kind !== 'ocs_viewer') return artifact;
+  const failedResponse = allObservations().find((obs) => obs.status !== undefined && obs.status >= 400);
+  if (failedResponse) {
+    throw new AcquisitionError('EXTERNAL_TOOL_HTTP_ERROR', `ExternalTool launch HTTP ${failedResponse.status}`,
+      failedResponse.status === 401 || failedResponse.status === 429 || failedResponse.status! >= 500);
+  }
   if (artifact) return artifact;
-  throw new Error('ExternalTool launch did not yield a downloadable file or OCS viewer URL');
+  throw new AcquisitionError('EXTERNAL_TOOL_NO_ARTIFACT', 'ExternalTool launch did not yield a downloadable file or OCS viewer URL', false);
 }
