@@ -110,6 +110,20 @@ test('buildToolList attaches an object outputSchema to every exposed tool', () =
   assert.equal(handoffProps?.download_url?.type, 'string');
 });
 
+test('announcement output schemas require course provenance and expose attachment provenance', () => {
+  const tools = buildToolList(['eclass_get_announcements', 'eclass_get_materials'].map((name) => ({
+    name, description: name, inputSchema: { type: 'object' as const, properties: {} },
+  })));
+  const announcements = tools.find((tool) => tool.name === 'eclass_get_announcements')!.outputSchema!;
+  const announcementProps = announcements.properties as { result: { items: { required: string[] } } };
+  assert.deepEqual(announcementProps.result.items.required, ['id', 'course_id']);
+
+  const materials = tools.find((tool) => tool.name === 'eclass_get_materials')!.outputSchema!;
+  const materialProps = materials.properties as { materials: { items: { properties: Record<string, { type: string }> } } };
+  assert.equal(materialProps.materials.items.properties.announcement_id.type, 'string');
+  assert.equal(materialProps.materials.items.properties.announcement_ids.type, 'array');
+});
+
 test('explicit tool outputSchema is preserved over the registry default', () => {
   const custom = { type: 'object' as const, properties: { custom: { type: 'string' } } };
   const tools = buildToolList([

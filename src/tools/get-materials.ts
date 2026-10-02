@@ -20,6 +20,10 @@ function resolveMaterialUrl(rawUrl: string | null | undefined): string | null {
 export interface Material extends Partial<MaterialAcquisition> {
   id: string;
   canvas_file_id?: string;
+  /** Originating announcement, retained even when another source represents the file. */
+  announcement_id?: string;
+  /** All originating announcements when a file is reused in multiple notices. */
+  announcement_ids?: string[];
   title: string;
   type: string;
   url: string | null;
@@ -82,15 +86,24 @@ interface RawModule {
   id: number;
   name: string;
   items?: RawModuleItem[];
-  state?: string;
+  state?: string | null;
   unlock_at?: string | null;
 }
 
+function latestUnlockAt(values: Array<string | null | undefined>): string | undefined {
+  let latest: string | undefined;
+  for (const value of values) {
+    if (!value || !Number.isFinite(Date.parse(value))) continue;
+    if (!latest || Date.parse(value) > Date.parse(latest)) latest = value;
+  }
+  return latest ?? values.find((value): value is string => Boolean(value));
+}
+
 function moduleAvailability(module: RawModule, item: RawModuleItem): Pick<Material, 'locked_for_user' | 'unlock_at'> {
+  const unlockAt = latestUnlockAt([module.unlock_at, item.content_details?.unlock_at, item.content_details?.lock_info?.unlock_at]);
   return {
     ...(module.state === 'locked' || item.content_details?.locked_for_user ? { locked_for_user: true } : {}),
-    ...(module.unlock_at || item.content_details?.unlock_at || item.content_details?.lock_info?.unlock_at
-      ? { unlock_at: item.content_details?.unlock_at ?? item.content_details?.lock_info?.unlock_at ?? module.unlock_at } : {}),
+    ...(unlockAt ? { unlock_at: unlockAt } : {}),
   };
 }
 
@@ -269,6 +282,7 @@ async function fetchAnnouncements(client: CanvasClient, courseId: number): Promi
         type: att['content-type'] ?? 'file',
         url: att.url,
         source: 'announcements' as MaterialSource,
+        announcement_id: String(announcement.id),
         module_name: announcement.title,
       });
     }
@@ -453,17 +467,22 @@ function mergeMaterialGroup(group: Material[]): Material {
     .sort((a, b) => sourceRank(a) - sourceRank(b));
   const canvasFileId = primary.canvas_file_id
     ?? ranked.find(({ material }) => material.canvas_file_id)?.material.canvas_file_id;
+  const announcementIds = [...new Set(ranked.flatMap(({ material }) =>
+    material.announcement_ids ?? (material.announcement_id ? [material.announcement_id] : [])))];
+  const unlockAt = latestUnlockAt(group.map((material) => material.unlock_at));
 
   const merged: Material = {
     ...primary,
     ...(canvasFileId ? { canvas_file_id: canvasFileId } : {}),
+    ...(announcementIds.length > 0 ? { announcement_id: announcementIds[0] } : {}),
+    ...(announcementIds.length > 1 ? { announcement_ids: announcementIds } : {}),
     type: locator.type || primary.type,
     url: locator.url,
     sources,
     ...(locator.source !== primary.source ? { url_source: locator.source } : {}),
     ...(moduleName ? { module_name: moduleName } : {}),
     ...(group.some((material) => material.locked_for_user) ? { locked_for_user: true } : {}),
-    ...(group.find((material) => material.unlock_at)?.unlock_at ? { unlock_at: group.find((material) => material.unlock_at)!.unlock_at } : {}),
+    ...(unlockAt ? { unlock_at: unlockAt } : {}),
     ...(group.some((material) => material.is_downloaded !== undefined)
       ? { is_downloaded: Boolean(downloaded) }
       : {}),

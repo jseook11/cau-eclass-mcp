@@ -8,6 +8,7 @@ import type { CanvasClient as CanvasClientType } from '../src/canvas-client.js';
 import type { BrowserSession } from '../src/browser-session.js';
 import type { FileCache } from '../src/file-cache.js';
 import { materialFingerprint } from '../src/material-acquisition.js';
+import { downloadOne } from '../src/tools/download.js';
 
 test('ExternalTool wrappers stay unresolved without semantic evidence, even in Online lecture', async () => {
   const result = await getMaterials(mockClient(async () => [{
@@ -43,6 +44,72 @@ function mockSession(overrides: Partial<BrowserSession> = {}): BrowserSession {
 function mockCache(get: (fileId: string) => unknown): FileCache {
   return { get } as FileCache;
 }
+
+test('getMaterials preserves announcement provenance when another source represents the attachment', async () => {
+  const client = mockClient(async () => [{
+    id: 20, title: '강의자료 안내', attachments: [{
+      id: 55, display_name: 'slides.pdf', 'content-type': 'application/pdf',
+      url: 'https://ocs.cau.ac.kr/em/slides',
+    }],
+  }]);
+  const session = mockSession({ interceptCourseresource: async () => [{
+    id: 'resource-1', title: 'slides.pdf', type: 'pdf', url: 'https://ocs.cau.ac.kr/em/slides',
+  }] });
+
+  const result = await getMaterials(client, session, 1, ['announcements', 'courseresource']);
+
+  assert.equal(result.materials.length, 1);
+  assert.equal(result.materials[0].source, 'courseresource');
+  assert.equal(result.materials[0].announcement_id, '20');
+  assert.deepEqual(result.materials[0].sources, ['courseresource', 'announcements']);
+});
+
+test('a shared attachment retains every originating announcement ID despite repeated titles', async () => {
+  const result = await getMaterials(mockClient(async () => [20, 21].map((id) => ({
+    id, title: '강의자료 안내', attachments: [{
+      id: 55, display_name: 'slides.pdf', 'content-type': 'application/pdf',
+      url: 'https://eclass3.cau.ac.kr/files/55/download',
+    }],
+  }))), mockSession(), 1, ['announcements']);
+
+  assert.equal(result.materials.length, 1);
+  assert.equal(result.materials[0].announcement_id, '20');
+  assert.deepEqual(result.materials[0].announcement_ids, ['20', '21']);
+});
+
+test('locked and future Canvas modules stay not_open without a launch, download, or retry', async () => {
+  for (const module of [
+    { state: 'locked', unlock_at: '2099-09-17T15:00:00Z' },
+    { state: 'locked' },
+    { state: null, unlock_at: '2099-09-17T15:00:00Z' },
+    { state: 'unlocked', unlock_at: '2099-09-17T15:00:00Z', itemUnlockAt: '2020-01-01T00:00:00Z' },
+  ]) {
+    const client = mockClient(async () => [{
+      id: 3, name: '3주차', ...module,
+      items: [{ id: 11, title: 'Chapter 5', type: 'ExternalTool',
+        html_url: '/courses/1/modules/items/11',
+        content_details: { unlock_at: module.itemUnlockAt },
+      }],
+    }]);
+    const session = mockSession({
+      resolveExternalToolLaunch: async () => { throw new Error('locked material must not launch'); },
+      downloadCourseresourceFile: async () => { throw new Error('locked material must not download'); },
+    });
+    const result = await getMaterials(client, session, 1, ['external'], undefined, { resolveExternal: true });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.materials.length, 1);
+    const material = result.materials[0];
+    assert.equal(material.acquisition_policy, 'not_open');
+    assert.equal(material.downloadable, false);
+    const outcome = await downloadOne({ session, token: 'tok', fileCache: mockCache(() => { throw new Error('locked material must not use file cache'); }) }, {
+      ...material, file_id: material.id, course_id: 1, display_name: material.title,
+    });
+    assert.equal(outcome.status, 'not_open');
+    assert.equal(outcome.retryable, false);
+    assert.equal(outcome.next_action, 'wait_until_open');
+  }
+});
 
 test('getMaterials returns materials and errors when one source fails', async () => {
   const client = mockClient(async (path) => {
@@ -328,6 +395,7 @@ test('getMaterials merges Canvas file aliases across modules and announcements',
 
   assert.equal(result.materials.length, 1);
   assert.equal(result.materials[0].source, 'announcements');
+  assert.equal(result.materials[0].announcement_id, '20');
   assert.deepEqual(result.materials[0].sources, ['announcements', 'modules']);
 });
 

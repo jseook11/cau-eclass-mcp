@@ -15,7 +15,7 @@ const sampleSnapshot: CourseSnapshot = {
     { title: '보고서1', course_name: '일반물리실험', due_at: '2026-06-20T23:59:00.000+09:00', is_submitted: false, is_missing: false, url: null },
   ],
   announcements: [
-    { id: 1, title: '휴강 안내', author: '교수', posted_at: '2026-06-01T10:00:00.000+09:00', message: '휴강', has_attachment: false },
+    { id: 1, course_id: 1, title: '휴강 안내', author: '교수', posted_at: '2026-06-01T10:00:00.000+09:00', message: '휴강', has_attachment: false },
   ],
   materials: [
     { id: 'm1', title: '1주차.pdf', type: 'application/pdf', url: 'https://x/f', source: 'files', is_downloaded: true },
@@ -82,6 +82,31 @@ test('exportCourseSnapshot returns json snapshot with partial failures', async (
   const sections = result.partial_failures.map((f) => f.section);
   assert.ok(sections.includes('materials:courseresource'));
   assert.ok(sections.includes('materials:modulebuilder'));
+});
+
+test('exportCourseSnapshot preserves announcement and merged attachment provenance in JSON exports', async () => {
+  const outPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'snapshot-provenance-')), 'course.json');
+  const attachmentUrl = 'https://ocs.cau.ac.kr/em/slides';
+  const deps = {
+    client: { ...makeClient(), fetchAll: async (requestPath: string) => requestPath.includes('/discussion_topics') ? [{
+      id: 20, title: '강의자료 안내', attachments: [{ id: 55, display_name: 'slides.pdf', url: attachmentUrl, 'content-type': 'application/pdf' }],
+    }] : [] },
+    session: { ...makeSession(), interceptCourseresource: async () => [{ id: 'resource-1', title: 'slides.pdf', type: 'pdf', url: attachmentUrl }] },
+    fileCache: { ...makeFileCache(), get: () => null },
+  };
+  try {
+    const inline = await exportCourseSnapshot(deps, { course_id: 1, format: 'json' });
+    assert.equal(inline.snapshot?.announcements[0].course_id, 1);
+    assert.equal(inline.snapshot?.materials[0].source, 'courseresource');
+    assert.equal(inline.snapshot?.materials[0].announcement_id, '20');
+
+    await exportCourseSnapshot(deps, { course_id: 1, format: 'json', output_path: outPath });
+    const saved: CourseSnapshot = JSON.parse(await fs.readFile(outPath, 'utf8'));
+    assert.equal(saved.announcements[0].course_id, 1);
+    assert.equal(saved.materials[0].announcement_id, '20');
+  } finally {
+    await fs.rm(path.dirname(outPath), { recursive: true, force: true });
+  }
 });
 
 test('exportCourseSnapshot writes file when output_path is given', async () => {

@@ -306,12 +306,13 @@ const ECLASS_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   eclass_get_announcements: arrayResult(
     obj({
       id: { type: ['string', 'number'] },
+      course_id: num,
       title: str,
       author: str,
       posted_at: { type: ['string', 'null'] },
       message: str,
       has_attachment: bool,
-    }),
+    }, ['id', 'course_id']),
   ),
   eclass_get_materials: obj(
     {
@@ -320,6 +321,7 @@ const ECLASS_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       sources: obj({ requested: arr(str), succeeded: arr(str), failed: arr(str) }),
       materials: arr(obj({
         id: str, title: str, type: str, url: { type: ['string', 'null'] }, source: str,
+        announcement_id: str, announcement_ids: arr(str),
         asset_kind: { type: 'string', enum: ['document', 'video', 'interactive', 'unresolved'] },
         downloadable: bool,
         acquisition_policy: { type: 'string', enum: ['download', 'exclude', 'needs_resolution', 'not_open'] },

@@ -4,7 +4,33 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { downloadFile } from '../src/tools/download-file.js';
+import { downloadFile, validateCachedDownload } from '../src/tools/download-file.js';
+
+test('validateCachedDownload never aliases distinct source IDs by a repeated title', async () => {
+  const result = await validateCachedDownload({
+    get: (id: string) => { assert.equal(id, 'week-2-source-id'); return null; },
+    findByName: () => { throw new Error('a repeated title must not be queried for cache identity'); },
+    record: () => { throw new Error('another ID must not be registered as the same download'); },
+  }, { file_id: 'week-2-source-id', course_id: 1, display_name: '강의 슬라이드' });
+
+  assert.equal(result, null);
+});
+
+test('validateCachedDownload requires the requested course and known source for an exact ID hit', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'download-cache-identity-'));
+  const localPath = path.join(dir, 'slides.pdf');
+  await fs.writeFile(localPath, 'pdf');
+  const record = { local_path: localPath, size_bytes: 3, course_id: 1, source: 'files' };
+  const cache = { get: () => record, findByName: () => { throw new Error('must not search by title'); }, record: () => {} };
+  const item = { file_id: '55', course_id: 1, source: 'files', display_name: '강의 슬라이드' };
+  try {
+    assert.equal(await validateCachedDownload(cache, { ...item, course_id: 2 }), null);
+    assert.equal(await validateCachedDownload(cache, { ...item, source: 'modulebuilder' }), null);
+    assert.deepEqual(await validateCachedDownload(cache, item), { local_path: localPath, size_bytes: 3 });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('downloadFile follows announcement attachment redirects without leaking auth cross-origin', async () => {
   const originalFetch = globalThis.fetch;

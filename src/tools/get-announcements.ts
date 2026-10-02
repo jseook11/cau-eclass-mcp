@@ -45,6 +45,7 @@ export async function getAnnouncements(
 
   return raw.slice(0, limit).map((item) => ({
     id: item.id,
+    course_id: courseId,
     title: item.title,
     author: item.author?.display_name ?? '',
     posted_at: parseIso(item.posted_at),

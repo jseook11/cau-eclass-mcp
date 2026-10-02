@@ -21,6 +21,7 @@ export interface Assignment {
 // Announcement returned by eclass_get_announcements
 export interface Announcement {
   id: number;
+  course_id: number;
   title: string;
   author: string;
   posted_at: string | null;    // ISO 8601, KST

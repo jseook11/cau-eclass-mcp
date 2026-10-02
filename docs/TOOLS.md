@@ -272,7 +272,8 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
 강의 공지사항.
 
 - 입력: `{ course_id: number, limit?: number = 20 }`
-- 출력: `[{ id, title, author, posted_at, message, has_attachment }]` — message는 HTML 제거된 텍스트.
+- 출력: `[{ id, course_id, title, author, posted_at, message, has_attachment }]` — message는 HTML 제거된 텍스트.
+  - `id`, `course_id`는 필수이며 `course_id`는 조회한 강의 ID이다. 공지 ID나 호출 순서로 과목을 추정할 필요 없이 원본 과목을 보존한다. JSON snapshot에도 그대로 포함된다.
 
 ### eclass_get_materials
 
@@ -294,10 +295,11 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - `courseresource`는 LearningX HTTP/API를 먼저 시도하고 실패 시 Playwright 인터셉트로
     폴백한다. `modulebuilder`는 아직 Playwright를 사용한다.
 - 출력: `{ ok, course_id, sources: { requested, succeeded, failed }, materials, errors, warnings }`
-  - material: `{ id, canvas_file_id?, title, type, url, source, asset_kind, downloadable, acquisition_policy, resolution_reason, fingerprint, sources?, url_source?, module_name?, is_playwright_required?, is_playright_required?, is_downloaded?, local_path? }`
+  - material: `{ id, canvas_file_id?, announcement_id?, announcement_ids?, title, type, url, source, asset_kind, downloadable, acquisition_policy, resolution_reason, fingerprint, sources?, url_source?, module_name?, is_playwright_required?, is_playright_required?, is_downloaded?, local_path? }`
+  - 공지 첨부파일은 `announcement_id`로 원본 공지를 식별한다. 다른 source가 대표 자료가 되도록 병합돼도 보존하며, 여러 공지가 같은 파일을 재사용하면 `announcement_ids`에 모든 공지 ID를 남긴다. 이때 `announcement_id`는 대표 공지 ID이고 JSON snapshot에도 동일한 provenance를 포함한다.
   - `asset_kind`은 document/video/interactive/unresolved이고 `acquisition_policy`는 download/exclude/needs_resolution/not_open이다. 파일 다운로드는 `downloadable: true` 및 `acquisition_policy: download`인 항목에만 수행한다. ExternalTool, 모듈명, 제목 또는 일반 OCS viewer URL만으로 문서/영상이라고 추정하지 않는다.
   - `resolve_external: true`는 미확인 ExternalTool을 선택적으로 LTI 확인하며 파일을 저장하지 않는다. `resolution_retryable`/`resolution_error_code`/`resolution_debug`로 확인 실패를 구분한다. 같은 fingerprint의 비재시도 결과는 SQLite에서 재사용한다. 자세한 Collector 연동 규칙은 [ExternalTool acquisition contract](EXTERNAL_TOOL_ACQUISITION.md)를 참조한다.
-  - Canvas의 잠금 및 미래 unlock_at은 `not_open`으로 반환하고 LTI 확인을 하지 않는다.
+  - Canvas의 잠금 및 미래 unlock_at은 자료를 목록에 보존하면서 `not_open`으로 반환하고 LTI 확인·파일 다운로드·실패 재시도를 하지 않는다. 모듈/항목/병합 별칭의 unlock_at 중 가장 늦은 시각을 적용해 항목의 과거 날짜가 모듈의 미래 잠금을 덮어쓰지 않게 한다.
   - 동일 source의 같은 ID, 동일 OCS 콘텐츠 URL, Canvas file URL 별칭, 같은 주차학습/외부도구 module item은 하나로 합친다. `source`는 의미 우선순위가 가장 높은 대표 출처이고, `sources`에는 합쳐진 모든 출처를 보존한다. 제목만 같은 서로 다른 ID는 합치지 않는다.
   - Canvas File module item은 `content_id`를 `canvas_file_id`로 보존해 module-item URL만 있어도 `files`/`announcements` 별칭과 합친다. 병합 후 `url`/`type`은 영상이면 OCS URL, 일반 파일이면 직접 다운로드 URL을 우선하며, URL 제공자가 대표 `source`와 다르면 `url_source`에 기록한다.
   - `modules`와 `external`을 함께 요청해도 공통 Canvas modules API는 한 번만 호출하고 결과를 유형별로 나눈다.

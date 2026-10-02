@@ -35,6 +35,10 @@
 
 Canvas `state: locked`, `unlock_at`, item의 `content_details.locked_for_user`를 반영해 `not_open`을 반환한다. Modules API에 `include[]=items`와 `include[]=content_details`를 함께 요청한다. 필드 의미는 [Canvas Modules API](https://developerdocs.instructure.com/services/canvas/resources/modules)에 따른다. modulebuilder의 기존 `not_open` placeholder 제외 동작은 유지한다.
 
+잠긴 Canvas ExternalTool은 목록에 보존하며 `downloadable: false`, `acquisition_policy: not_open`으로 내려보낸다. 모듈과 항목의 unlock_at 및 병합된 별칭의 unlock_at 중 가장 늦은 유효 시각을 적용한다. 따라서 자식 항목의 과거 날짜가 부모 모듈의 미래 잠금을 해제하지 않는다. 파일 다운로드 결과도 `not_open`, `retryable: false`이므로 다운로드 실패로 집계하지 않는다.
+
+공지 provenance도 원본 ID로 보존한다. 공지 조회 결과의 필수 `course_id`는 조회 과목을 나타내며, 공지 첨부 material의 `announcement_id`는 원본 공지를 나타낸다. 다른 source가 대표가 되더라도 이 관계를 유지하고, 같은 파일이 여러 공지에 재사용되면 `announcement_ids`로 모든 관계를 반환한다. JSON snapshot도 해당 필드를 그대로 포함한다.
+
 ## 다운로드 결과
 
 단일/배치 다운로드 입력에는 위 분류 필드와 `module_name`, `external_url`, `locked_for_user`, `unlock_at`을 전달할 수 있다. 단일 호출에서는 `id → file_id`, `title → display_name`을 매핑한다. 명시적인 비파일 정책은 캐시 확인·LTI launch·파일 다운로드보다 먼저 처리한다. 이전 클라이언트처럼 분류 필드 없이 ExternalTool을 호출하면 실제 LTI 확인을 수행하되, 파일 미확인 결과를 재시도 가능한 다운로드 실패로 변환하지 않는다.
