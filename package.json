@@ -8,12 +8,12 @@
   "author": "Jaeseok (@jseook11)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jseook11/eclass-mcp.git"
+    "url": "git+https://github.com/jseook11/cau-eclass-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/jseook11/eclass-mcp/issues"
+    "url": "https://github.com/jseook11/cau-eclass-mcp/issues"
   },
-  "homepage": "https://github.com/jseook11/eclass-mcp#readme",
+  "homepage": "https://github.com/jseook11/cau-eclass-mcp#readme",
   "packageManager": "pnpm@11.6.0",
   "keywords": [
     "mcp",

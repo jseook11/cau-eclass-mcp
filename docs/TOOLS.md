@@ -1,4 +1,4 @@
-# eclass-mcp 툴 사용 가이드
+# cau-eclass-mcp 툴 사용 가이드
 
 MCP 클라이언트(Claude, Codex 등)에서 각 툴을 어떻게 쓰는지 정리한 문서.
 skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 여기에 같이 기록한다.
