@@ -30,12 +30,11 @@ test('fetch on a download returns a clickable URL when handoffBaseUrl is set', a
     contextWith({ handoffBaseUrl: 'http://127.0.0.1:8787' }),
     'eclass://download/3636147',
   );
-  assert.match(res.text, /파일 URL: http:\/\/127\.0\.0\.1:8787\/files\//);
-  assert.match(res.text, /파일 본문이나 첨부파일이 없습니다/);
-  assert.match(res.text, /공개 인터넷에서 접근 가능/);
-  assert.match(res.text, /ECLASS_HANDOFF_BASE_URL/);
-  assert.match(res.url, /^http:\/\/127\.0\.0\.1:8787\/files\//);
-  assert.ok(res.metadata?.download_url?.startsWith('http://127.0.0.1:8787/files/'));
+  const url = new URL(res.url);
+  assert.equal(url.origin, 'http://127.0.0.1:8787');
+  assert.ok(url.pathname.startsWith('/files/'));
+  assert.equal(res.metadata?.download_url, res.url);
+  assert.ok(res.text.includes(res.url));
   // No server-side local path leaked into the model context.
   assert.ok(!res.text.includes('/tmp/'));
 });
@@ -43,7 +42,7 @@ test('fetch on a download returns a clickable URL when handoffBaseUrl is set', a
 test('fetch on a download falls back to metadata JSON without handoffBaseUrl (stdio)', async () => {
   clearHandoffs();
   const res = await fetchEclassDocument(contextWith({}), 'eclass://download/3636147');
-  assert.match(res.text, /"file_id": "3636147"/);
+  assert.equal(JSON.parse(res.text).file_id, record.file_id);
   assert.equal(res.url, 'eclass://download/3636147');
   assert.equal(res.metadata?.download_url, undefined);
 });

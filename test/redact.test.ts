@@ -39,8 +39,9 @@ test('redactUrl masks sensitive query params and keeps the rest', () => {
 
   assert.ok(!result.includes('tok123'));
   assert.ok(!result.includes('ver456'));
-  assert.ok(result.includes('page=2'));
-  assert.ok(result.includes(`access_token=${encodeURIComponent(REDACTED)}`));
+  const sanitized = new URL(result);
+  assert.equal(sanitized.searchParams.get('page'), '2');
+  assert.equal(sanitized.searchParams.get('access_token'), REDACTED);
 });
 
 test('redactUrl never echoes an unparseable URL', () => {
@@ -51,7 +52,9 @@ test('redactUrl never echoes an unparseable URL', () => {
 test('redactUrl hides URL userinfo and fragments', () => {
   const result = redactUrl('https://user:password@example.com/callback#access_token=fragment-secret');
   assert.doesNotMatch(result, /user|password|fragment-secret/);
-  assert.match(result, /REDACTED/);
+  const sanitized = new URL(result);
+  assert.equal(sanitized.origin, 'https://example.com');
+  assert.equal(sanitized.pathname, '/callback');
 });
 
 test('summarizeBody returns form field names without values', () => {

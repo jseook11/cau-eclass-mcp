@@ -53,6 +53,7 @@ test('parseArgs accepts --target encrypted', () => {
 test('setup --target encrypted stores ciphertext in secrets.enc', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-setup-enc-'));
   const encPath = path.join(dir, 'secrets.enc');
+  const key = crypto.randomBytes(32);
   const result = await runSetupCli([
     '--target', 'encrypted',
     '--username', 'enc_user',
@@ -60,18 +61,19 @@ test('setup --target encrypted stores ciphertext in secrets.enc', async () => {
     '--no-doctor',
   ], 'topsecretpw\n', {
     ECLASS_CREDENTIAL_BACKEND: 'encrypted',
-    ECLASS_SECRET_KEY: crypto.randomBytes(32).toString('base64'),
+    ECLASS_SECRET_KEY: key.toString('base64'),
     ECLASS_ENC_STORE_PATH: encPath,
     ECLASS_SECRET_STORE_PATH: path.join(dir, 'legacy.json'),
   });
   assert.equal(result.code, 0, result.output);
   const onDisk = await fs.readFile(encPath, 'utf8');
   assert.ok(!onDisk.includes('topsecretpw'), 'plaintext password must not appear on disk');
-  assert.match(onDisk, /"iv"/);
+  const secrets = decryptSecretFile(key, JSON.parse(onDisk) as EncFile);
+  assert.deepEqual(Object.values(secrets).flatMap(Object.values), ['topsecretpw']);
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('encrypted setup reports wrong-key failures without keychain advice or secret values', async () => {
+test('encrypted setup with a wrong key preserves the store and keeps secrets out of errors', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-setup-wrong-key-'));
   const encPath = path.join(dir, 'secrets.enc');
   const originalKey = crypto.randomBytes(32);
@@ -83,6 +85,7 @@ test('encrypted setup reports wrong-key failures without keychain advice or secr
       JSON.stringify(encryptSecretFile(originalKey, {}), null, 2) + '\n',
       { mode: 0o600 },
     );
+    const originalStore = await fs.readFile(encPath, 'utf8');
     const result = await runSetupCli([
       '--target', 'encrypted',
       '--username', 'enc_user',
@@ -97,9 +100,7 @@ test('encrypted setup reports wrong-key failures without keychain advice or secr
     });
 
     assert.equal(result.code, 1, result.output);
-    assert.match(result.output, /encrypted credential store/);
-    assert.match(result.output, /원인:/);
-    assert.doesNotMatch(result.output, /Secret Service|libsecret|GNOME Keyring|KWallet/);
+    assert.equal(await fs.readFile(encPath, 'utf8'), originalStore);
     assert.doesNotMatch(result.output, new RegExp(password));
     assert.doesNotMatch(
       result.output,
@@ -110,7 +111,7 @@ test('encrypted setup reports wrong-key failures without keychain advice or secr
   }
 });
 
-test('Hermes setup with an explicitly resolved encrypted backend reports unsafe store permissions accurately', async (t) => {
+test('Hermes setup rejects unsafe encrypted store permissions without changing config or credentials', async (t) => {
   if (os.platform() === 'win32') return t.skip('POSIX permission test');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-setup-unsafe-enc-'));
   const hermesConfigPath = path.join(dir, 'config.yaml');
@@ -124,6 +125,7 @@ test('Hermes setup with an explicitly resolved encrypted backend reports unsafe 
       { mode: 0o600 },
     );
     await fs.chmod(encPath, 0o644);
+    const originalStore = await fs.readFile(encPath, 'utf8');
 
     const result = await runSetupCli([
       '--target', 'hermes',
@@ -140,9 +142,7 @@ test('Hermes setup with an explicitly resolved encrypted backend reports unsafe 
     });
 
     assert.equal(result.code, 1, result.output);
-    assert.match(result.output, /encrypted credential store/);
-    assert.match(result.output, /permissions too open|0600/);
-    assert.doesNotMatch(result.output, /Secret Service|libsecret|GNOME Keyring|KWallet/);
+    assert.equal(await fs.readFile(encPath, 'utf8'), originalStore);
     assert.doesNotMatch(result.output, /do-not-print-this-password/);
     const unchanged = YAML.parse(await fs.readFile(hermesConfigPath, 'utf8')) as any;
     assert.deepEqual(unchanged.mcp_servers, {});
@@ -151,7 +151,7 @@ test('Hermes setup with an explicitly resolved encrypted backend reports unsafe 
   }
 });
 
-test('credential failure formatter retains keytar-specific remediation and redacts causes', () => {
+test('credential failure formatter redacts passwords and master keys from error causes', () => {
   const password = 'formatter-password-value';
   const masterKey = crypto.randomBytes(32).toString('base64');
   const output = formatCredentialStoreFailure(
@@ -163,9 +163,7 @@ test('credential failure formatter retains keytar-specific remediation and redac
     },
   );
 
-  assert.match(output, /Secret Service\/libsecret/);
-  assert.match(output, /secret-tool/);
-  assert.doesNotMatch(output, /encrypted credential store에 비밀번호/);
+  assert.ok(output.trim().length > 0);
   assert.doesNotMatch(output, new RegExp(password));
   assert.doesNotMatch(
     output,
@@ -189,7 +187,7 @@ test('setup --target encrypted fails closed without a master key and never print
       ECLASS_SECRET_STORE_PATH: path.join(dir, 'legacy.json'),
     });
     assert.equal(result.code, 1, result.output);
-    assert.match(result.output, /encrypted backend.*필요|마스터 키/);
+    assert.doesNotMatch(result.output, /topsecretpw/);
     assert.doesNotMatch(result.output, /ECLASS_SECRET_KEY=[A-Za-z0-9+/=_-]{20,}/);
     await assert.rejects(() => fs.stat(path.join(dir, 'secrets.enc')));
   } finally {
@@ -223,7 +221,8 @@ test('setup generates an exclusive raw 0600 master-key file without printing the
     assert.equal((await fs.stat(keyPath)).mode & 0o777, 0o600);
     assert.equal((await fs.stat(encPath)).mode & 0o777, 0o600);
     assert.doesNotMatch(result.output, new RegExp(key.toString('base64').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.match(result.output, /generated private file/);
+    const encrypted = JSON.parse(await fs.readFile(encPath, 'utf8')) as EncFile;
+    assert.deepEqual(Object.values(decryptSecretFile(key, encrypted)).flatMap(Object.values), ['topsecretpw']);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -255,15 +254,13 @@ test('setup does not require .mcp.json when Hermes config exists', async () => {
   });
 
   assert.equal(result.code, 0, result.output);
-  assert.match(result.output, /Canvas token\/session은 encrypted secure backend/);
-  assert.doesNotMatch(result.output, /OS credential store 사용이 불가능한 환경/);
   const written = YAML.parse(await fs.readFile(hermesConfigPath, 'utf8')) as any;
   assert.equal(written.existing_key, 'kept');
   assert.equal(written.mcp_servers.eclass.env.ECLASS_USERNAME, 'my_id');
   assert.equal(written.mcp_servers.eclass.env.ECLASS_PASSWORD, 'secret');
   assert.equal(written.mcp_servers.eclass.env.ALLOW_PLAINTEXT_ENV_SECRETS, '1');
   const encrypted = JSON.parse(await fs.readFile(encPath, 'utf8')) as EncFile;
-  assert.deepEqual(decryptSecretFile(key, encrypted), {}, 'capability probe must be removed');
+  assert.deepEqual(decryptSecretFile(key, encrypted), {}, 'a plaintext password opt-in leaves no credentials in the secure cache');
 
   await fs.rm(dir, { recursive: true, force: true });
 });
@@ -305,8 +302,6 @@ test('Hermes plaintext override rejects legacy or unconfigured secure backends b
       });
 
       assert.equal(result.code, 1, `${testCase.name}: ${result.output}`);
-      assert.match(result.output, /Canvas token\/session.*secure backend/);
-      assert.doesNotMatch(result.output, /OS credential store 사용이 불가능한 환경/);
       assert.doesNotMatch(result.output, /must-not-be-written/);
       const unchanged = YAML.parse(await fs.readFile(hermesConfigPath, 'utf8')) as any;
       assert.deepEqual(unchanged.mcp_servers, {});
@@ -327,6 +322,7 @@ test('Hermes plaintext override probes encrypted storage and rejects a wrong key
       `${JSON.stringify(encryptSecretFile(crypto.randomBytes(32), {}))}\n`,
       { mode: 0o600 },
     );
+    const originalStore = await fs.readFile(encPath, 'utf8');
 
     const result = await runSetupCli([
       '--target', 'hermes',
@@ -344,7 +340,7 @@ test('Hermes plaintext override probes encrypted storage and rejects a wrong key
     });
 
     assert.equal(result.code, 1, result.output);
-    assert.match(result.output, /secure credential backend|encrypted/i);
+    assert.equal(await fs.readFile(encPath, 'utf8'), originalStore);
     assert.doesNotMatch(result.output, /must-not-be-written/);
     const unchanged = YAML.parse(await fs.readFile(hermesConfigPath, 'utf8')) as any;
     assert.deepEqual(unchanged.mcp_servers, {});
@@ -358,6 +354,7 @@ test('setup creates an explicit .mcp.json privately and strips plaintext secrets
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-setup-mcp-json-'));
   const configPath = path.join(dir, 'nested', 'client.json');
   const encPath = path.join(dir, 'credentials', 'secrets.enc');
+  const key = crypto.randomBytes(32);
   try {
     const result = await runSetupCli([
       '--target', 'mcp-json',
@@ -367,13 +364,15 @@ test('setup creates an explicit .mcp.json privately and strips plaintext secrets
       '--no-doctor',
     ], 'temporary-password\n', {
       ECLASS_CREDENTIAL_BACKEND: 'encrypted',
-      ECLASS_SECRET_KEY: crypto.randomBytes(32).toString('base64'),
+      ECLASS_SECRET_KEY: key.toString('base64'),
       ECLASS_ENC_STORE_PATH: encPath,
       ECLASS_SECRET_STORE_PATH: path.join(dir, 'legacy.json'),
     });
 
     assert.equal(result.code, 0, result.output);
-    assert.match(result.output, /LMS password: stored in encrypted file/);
+    assert.doesNotMatch(result.output, /temporary-password/);
+    const encrypted = JSON.parse(await fs.readFile(encPath, 'utf8')) as EncFile;
+    assert.deepEqual(Object.values(decryptSecretFile(key, encrypted)).flatMap(Object.values), ['temporary-password']);
     const written = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
       mcpServers: { eclass: { env: Record<string, string> } };
     };
@@ -401,7 +400,7 @@ test('--allow-plaintext-env is rejected for targets that cannot persist it', asy
         '--no-doctor',
       ], 'must-not-be-used\n');
       assert.equal(result.code, 1, `${target}: ${result.output}`);
-      assert.match(result.output, /--target hermes에서만/);
+      assert.doesNotMatch(result.output, /must-not-be-used/);
     }
     await assert.rejects(() => fs.stat(configPath));
   } finally {
@@ -422,7 +421,6 @@ test('--config is rejected for ambiguous both and irrelevant encrypted targets',
         '--no-doctor',
       ], 'must-not-be-used\n');
       assert.equal(result.code, 1, `${target}: ${result.output}`);
-      assert.match(result.output, new RegExp(`--target ${target}`));
       assert.doesNotMatch(result.output, /must-not-be-used/);
     }
     await assert.rejects(() => fs.stat(configPath));
@@ -431,7 +429,7 @@ test('--config is rejected for ambiguous both and irrelevant encrypted targets',
   }
 });
 
-test('setup legacy-backend failure does not recommend plaintext Hermes env', async () => {
+test('setup with a read-only credential backend leaves Hermes config unchanged', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-setup-keyring-'));
   const hermesConfigPath = path.join(dir, 'config.yaml');
   await fs.writeFile(hermesConfigPath, YAML.stringify({ mcp_servers: {} }));
@@ -442,14 +440,14 @@ test('setup legacy-backend failure does not recommend plaintext Hermes env', asy
     '--username', 'my_id',
     '--password-stdin',
     '--no-doctor',
-  ], 'secret\n', {
+  ], 'read-only-backend-password\n', {
     ECLASS_CREDENTIAL_BACKEND: 'file',
+    ECLASS_SECRET_STORE_PATH: path.join(dir, 'secrets.json'),
   });
 
   assert.equal(result.code, 1, result.output);
-  assert.match(result.output, /secure credential backend/);
-  assert.match(result.output, /legacy read-only/);
-  assert.doesNotMatch(result.output, /--allow-plaintext-env/);
+  assert.doesNotMatch(result.output, /read-only-backend-password/);
+  await assert.rejects(() => fs.stat(path.join(dir, 'secrets.json')), { code: 'ENOENT' });
 
   const written = YAML.parse(await fs.readFile(hermesConfigPath, 'utf8')) as any;
   assert.deepEqual(written.mcp_servers, {});

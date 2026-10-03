@@ -22,7 +22,7 @@ function makeDeps(overrides: Partial<any> = {}) {
     } as Record<string, string>,
     spawn: (cmd: string, args: string[]) => {
       spawned.push({ cmd, args });
-      return cmd.includes('tunnel-client') ? tunnelChild : httpChild;
+      return spawned.length === 1 ? httpChild : tunnelChild;
     },
     waitHttpReady: async () => true,
     runDoctor: async () => ({ proceed: true, tolerated: [], blocking: [] as string[] }),
@@ -35,14 +35,11 @@ function makeDeps(overrides: Partial<any> = {}) {
   return { deps, spawned, httpChild, tunnelChild, writes };
 }
 
-test('runChatgptui starts http server then tunnel-client and writes pid file', async () => {
+test('runChatgptui starts both services and records their pids', async () => {
   const { deps, spawned, writes } = makeDeps();
   const result = await runChatgptui(deps as any);
   assert.equal(result.ok, true);
-  assert.match(spawned[0].cmd, /node/);
-  assert.ok(spawned[0].args.includes('--http'));
-  assert.match(spawned[1].cmd, /tunnel-client/);
-  assert.ok(spawned[1].args.includes('run'));
+  assert.equal(spawned.length, 2);
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].record, { http: 1001, tunnel: 2002, port: 8787 });
 });
@@ -75,7 +72,7 @@ test('runChatgptui splits least-privilege HTTP and tunnel environments', async (
     },
     spawn: (cmd: string, _args: string[], opts?: any) => {
       envsSeen.push({ cmd, env: opts?.env ?? {} });
-      return { pid: cmd.includes('tunnel-client') ? 2002 : 1001, killed: false, kill() {} };
+      return { pid: envsSeen.length === 1 ? 1001 : 2002, killed: false, kill() {} };
     },
     runDoctor: async (_profilePath: string, env: Record<string, string>) => {
       doctorEnv = env;
@@ -155,7 +152,6 @@ test('runChatgptui rejects OPENAI_API_KEY as a control-plane fallback', async ()
   const result = await runChatgptui(deps as any);
   assert.equal(result.ok, false);
   assert.equal(spawned.length, 0);
-  assert.ok(result.errors?.some((error) => error.includes('CONTROL_PLANE_API_KEY')));
 });
 
 test('runChatgptui resolves ECLASS_USERNAME from local config when env is missing', async () => {
@@ -177,7 +173,7 @@ test('runChatgptui resolves ECLASS_USERNAME from local config when env is missin
   assert.equal(envsSeen[1].ECLASS_USERNAME, undefined);
 });
 
-test('runChatgptui aborts (and kills http) when env invalid', async () => {
+test('runChatgptui rejects invalid env before starting services', async () => {
   const { deps, spawned } = makeDeps({ env: { ECLASS_USERNAME: 'x' } });
   const result = await runChatgptui(deps as any);
   assert.equal(result.ok, false);

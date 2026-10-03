@@ -12,19 +12,34 @@ import type { ExamCache } from '../src/exam-cache.js';
 import type { FileCache } from '../src/file-cache.js';
 
 type RawFixture = Record<string, unknown>;
+type CourseRequest = { path: string; params?: Record<string, string | readonly string[]> };
 
 function fakeCanvas(raw: RawFixture[]): {
   client: CanvasClient;
-  calls: Array<{ path: string; params?: Record<string, string> }>;
+  calls: CourseRequest[];
 } {
-  const calls: Array<{ path: string; params?: Record<string, string> }> = [];
+  const calls: CourseRequest[] = [];
   const client = {
-    async fetchAll(path: string, params?: Record<string, string>) {
+    async fetchAll(path: string, params?: CourseRequest['params']) {
       calls.push({ path, params });
       return raw;
     },
   } as unknown as CanvasClient;
   return { client, calls };
+}
+
+function courseRequestUrl(calls: CourseRequest[]): URL {
+  const call = calls.find(({ path }) => new URL(path, 'https://eclass3.cau.ac.kr').pathname === '/api/v1/courses');
+  assert.ok(call, 'the course list must be requested');
+  const url = new URL(call.path, 'https://eclass3.cau.ac.kr');
+  for (const [key, value] of Object.entries(call.params ?? {})) {
+    if (Array.isArray(value)) {
+      for (const entry of value) url.searchParams.append(key, entry);
+    } else {
+      url.searchParams.set(key, value as string);
+    }
+  }
+  return url;
 }
 
 const NOW = new Date('2026-08-26T12:00:00+09:00');
@@ -50,23 +65,19 @@ test('getCourses normalizes Canvas string IDs and rejects invalid public IDs', a
     { id: 123456, name: '강의 A' },
     { id: 42, name: '강의 B' },
   ]);
-  assert.deepEqual(calls, [{
-    path: '/api/v1/courses?include[]=term&include[]=concluded&state[]=available&state[]=completed',
-    params: {
-      enrollment_state: 'active',
-      per_page: '100',
-    },
-  }]);
+  const query = courseRequestUrl(calls).searchParams;
+  assert.deepEqual(new Set(query.getAll('include[]')), new Set(['term', 'concluded']));
+  assert.equal(query.get('enrollment_state'), 'active');
 });
 
 test('getCourses requests available and completed workflow states outside current scope', async () => {
   const allFixture = fakeCanvas([{ id: '1', name: '완료 상태의 활성 수강 이력' }]);
   await getCourses(allFixture.client, { scope: 'all', now: NOW });
-  assert.match(allFixture.calls[0]?.path ?? '', /state\[\]=available&state\[\]=completed$/);
+  assert.deepEqual(new Set(courseRequestUrl(allFixture.calls).searchParams.getAll('state[]')), new Set(['available', 'completed']));
 
   const trainingFixture = fakeCanvas([{ id: '2', name: '비교과 과정: 예방교육' }]);
   await getCourses(trainingFixture.client, { scope: 'training', now: NOW });
-  assert.match(trainingFixture.calls[0]?.path ?? '', /state\[\]=available&state\[\]=completed$/);
+  assert.deepEqual(new Set(courseRequestUrl(trainingFixture.calls).searchParams.getAll('state[]')), new Set(['available', 'completed']));
 
   const currentFixture = fakeCanvas([{
     id: '3',
@@ -74,8 +85,7 @@ test('getCourses requests available and completed workflow states outside curren
     term: { id: CURRENT_TERM_ID, name: '2026년 2학기' },
   }]);
   await getCourses(currentFixture.client, { scope: 'current', now: NOW });
-  assert.match(currentFixture.calls[0]?.path ?? '', /state\[\]=available$/);
-  assert.doesNotMatch(currentFixture.calls[0]?.path ?? '', /state\[\]=completed/);
+  assert.deepEqual(new Set(courseRequestUrl(currentFixture.calls).searchParams.getAll('state[]')), new Set(['available']));
 });
 
 test('getCourses serializes repeated Canvas include and state query parameters', async () => {
@@ -93,8 +103,8 @@ test('getCourses serializes repeated Canvas include and state query parameters',
     const client = new CanvasClient('https://eclass3.cau.ac.kr', 'test-token');
     await getCourses(client, { scope: 'all', now: NOW });
     const url = new URL(requestedUrl);
-    assert.deepEqual(url.searchParams.getAll('include[]'), ['term', 'concluded']);
-    assert.deepEqual(url.searchParams.getAll('state[]'), ['available', 'completed']);
+    assert.deepEqual(new Set(url.searchParams.getAll('include[]')), new Set(['term', 'concluded']));
+    assert.deepEqual(new Set(url.searchParams.getAll('state[]')), new Set(['available', 'completed']));
     assert.equal(url.searchParams.get('enrollment_state'), 'active');
   } finally {
     globalThis.fetch = originalFetch;
@@ -233,7 +243,7 @@ test('getCourses fails closed when no current academic term can be resolved', as
 
   await assert.rejects(
     () => getCourses(client, { scope: 'current', now: NOW }),
-    /CURRENT_TERM_UNRESOLVED/,
+    { code: 'CURRENT_TERM_UNRESOLVED' },
   );
 });
 
@@ -245,12 +255,10 @@ test('doctor checks course API health without requiring current-term inference',
 
   const result = await checkEclassCoursesApi(session);
 
-  assert.deepEqual(result, {
-    name: 'eclass courses API',
-    ok: true,
-    detail: 'active enrollments: 1',
-  });
-  assert.match(calls[0]?.path ?? '', /state\[\]=available&state\[\]=completed$/);
+  assert.equal(result.ok, true);
+  assert.equal(typeof result.detail, 'string');
+  assert.ok(result.detail.length > 0);
+  assert.deepEqual(new Set(courseRequestUrl(calls).searchParams.getAll('state[]')), new Set(['available', 'completed']));
 });
 
 test('eclass_get_courses satisfies its MCP output schema for Canvas string IDs', async () => {

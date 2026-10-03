@@ -4,8 +4,6 @@ import assert from 'node:assert/strict';
 import { BrowserSession } from '../src/browser-session.js';
 import { parseResourceItems } from '../src/resource-items.js';
 
-// API_PLAN: API-first courseresource가 실패하면 Playwright intercept로 폴백한다.
-
 function makeInterceptPage(items: unknown) {
   return {
     on() {},
@@ -17,54 +15,45 @@ function makeInterceptPage(items: unknown) {
   };
 }
 
-test('interceptCourseresource falls back to Playwright when the API path throws', async () => {
+function makeSession(apiFetcher: () => Promise<unknown>, browserItems: unknown) {
   const session = new BrowserSession('tester', async () => 'pw');
-  let apiCalls = 0;
-  let playwrightUsed = false;
   (session as any).getClient = async () => ({});
   (session as any).ensurePlaywrightReady = async () => {};
-  (session as any).courseResourceApiFetcher = async () => {
-    apiCalls += 1;
-    throw new Error('LearningX API error 500');
-  };
+  (session as any).courseResourceApiFetcher = apiFetcher;
   (session as any).withAuthenticatedContext = async (
     _label: string,
     _options: unknown,
     fn: (context: unknown) => Promise<unknown>,
   ) => {
-    playwrightUsed = true;
     return fn({
-      newPage: async () => makeInterceptPage([{ id: '7', title: '강의자료', url: 'https://eclass3.cau.ac.kr/files/7', type: 'file' }]),
+      newPage: async () => makeInterceptPage(browserItems),
       on() {},
     });
   };
+  return session;
+}
+
+test('interceptCourseresource recovers the resource list after a fetch failure', async () => {
+  const expected = [{ id: '7', title: '강의자료', url: 'https://eclass3.cau.ac.kr/files/7', type: 'file' }];
+  const session = makeSession(async () => {
+    throw new Error('LearningX API error 500');
+  }, expected);
 
   const items = await session.interceptCourseresource(1);
 
-  assert.equal(apiCalls, 1);
-  assert.equal(playwrightUsed, true);
-  assert.equal(items.length, 1);
-  assert.equal(items[0].id, '7');
+  assert.deepEqual(items, expected);
 });
 
-test('interceptCourseresource skips Playwright when the API path succeeds', async () => {
-  const session = new BrowserSession('tester', async () => 'pw');
-  let playwrightUsed = false;
-  (session as any).getClient = async () => ({});
-  (session as any).courseResourceApiFetcher = async () => [{ id: '1', title: 'api', url: null, type: 'file' }];
-  (session as any).withAuthenticatedContext = async () => {
-    playwrightUsed = true;
-    return [];
-  };
+test('interceptCourseresource returns successfully fetched resources', async () => {
+  const expected = [{ id: '1', title: '강의자료', url: null, type: 'file' }];
+  const session = makeSession(async () => expected, expected);
 
   const items = await session.interceptCourseresource(1);
 
-  assert.equal(playwrightUsed, false);
-  assert.equal(items.length, 1);
+  assert.deepEqual(items, expected);
 });
 
-test('parseResourceItems strict mode throws on unexpected shape (API → fallback trigger)', () => {
-  assert.throws(() => parseResourceItems({ unexpected: true }, { strict: true }), /resources_db/);
-  // 비-strict(인터셉트 경로)는 기존처럼 빈 배열 유지
+test('parseResourceItems rejects an unexpected shape in strict mode and returns no items otherwise', () => {
+  assert.throws(() => parseResourceItems({ unexpected: true }, { strict: true }), Error);
   assert.deepEqual(parseResourceItems({ unexpected: true }), []);
 });

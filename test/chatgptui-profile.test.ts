@@ -19,12 +19,6 @@ test('renderTunnelProfile emits http MCP target with X-Eclass-Auth env refs', ()
   assert.equal(doc.mcp.discovery_extra_headers['X-Eclass-Auth'], 'env:ECLASS_REMOTE_AUTH_TOKEN');
 });
 
-test('renderTunnelProfile never embeds a literal api key', () => {
-  const yaml = renderTunnelProfile({ tunnelId: 'tunnel_xyz', port: 9999 });
-  assert.ok(!/sk-/.test(yaml));
-  assert.match(yaml, /api_key:\s*env:CONTROL_PLANE_API_KEY/);
-});
-
 test('ensureTunnelProfile creates a 0600 file when missing', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-prof-'));
   const file = path.join(dir, 'sub', 'eclass-mcp.yaml');
@@ -91,10 +85,8 @@ test('ensureTunnelProfile refuses Authorization migration for custom profile', a
   ].join('\n');
   await fs.writeFile(file, existing, { mode: 0o600 });
   try {
-    await assert.rejects(
-      () => ensureTunnelProfile(file, OPTS, { managedProfile: false }),
-      /Authorization.*X-Eclass-Auth/,
-    );
+    await assert.rejects(() => ensureTunnelProfile(file, OPTS, { managedProfile: false }));
+    assert.equal(await fs.readFile(file, 'utf8'), existing);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

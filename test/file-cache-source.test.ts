@@ -22,7 +22,7 @@ async function withTempDb<T>(fn: (dbPath: string) => Promise<T>): Promise<T> {
   }
 }
 
-test('FileCache migrates an old downloaded_files table by adding source column', async () => {
+test('FileCache preserves legacy records and supports current course and source data', async () => {
   await withTempDb(async (dbPath) => {
     // Simulate a pre-migration DB without the `source` column
     const legacy = new Database(dbPath);
@@ -43,14 +43,13 @@ test('FileCache migrates an old downloaded_files table by adding source column',
     const { FileCache } = await import('../src/file-cache.js');
     const cache = new FileCache();
 
-    const cols = (cache.getDb().prepare('PRAGMA table_info(downloaded_files)').all() as Array<{ name: string }>).map((c) => c.name);
-    assert.ok(cols.includes('source'));
-    const courseCols = (cache.getDb().prepare('PRAGMA table_info(cached_courses)').all() as Array<{ name: string }>).map((c) => c.name);
-    assert.ok(courseCols.includes('is_current'));
-
     // Old row survives with null source; new row can store a source
     const old = cache.get('old1');
-    assert.equal(old?.source ?? null, null);
+    assert.ok(old, 'the legacy download remains available');
+    assert.equal(old.display_name, 'legacy.pdf');
+    assert.equal(old.local_path, '/tmp/legacy.pdf');
+    assert.equal(old.size_bytes, 10);
+    assert.equal(old.source ?? null, null);
 
     cache.record({ file_id: 'new1', course_id: 1, display_name: 'new.pdf', local_path: '/tmp/new.pdf', downloaded_at: '2026-02-01T00:00:00.000Z', size_bytes: 20, source: 'files' });
     assert.equal(cache.get('new1')?.source, 'files');

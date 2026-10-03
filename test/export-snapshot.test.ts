@@ -25,21 +25,18 @@ const sampleSnapshot: CourseSnapshot = {
   partial_failures: [],
 };
 
-test('renderMarkdown includes all sections', () => {
+test('renderMarkdown includes the course, assignments, announcements and materials', () => {
   const md = renderMarkdown(sampleSnapshot);
-  assert.match(md, /# 일반물리실험/);
-  assert.match(md, /## 과제 \(1\)/);
-  assert.match(md, /보고서1/);
-  assert.match(md, /## 공지 \(1\)/);
-  assert.match(md, /## 자료 \(1\)/);
-  assert.match(md, /✓ 다운로드됨/);
-  assert.ok(!md.includes('## 성적'));
+  for (const value of [sampleSnapshot.course_name, sampleSnapshot.assignments[0].title,
+    sampleSnapshot.announcements[0].title, sampleSnapshot.materials[0].title]) {
+    assert.ok(md.includes(value), `snapshot is missing ${value}`);
+  }
 });
 
 test('renderMarkdown shows grades section when present', () => {
   const md = renderMarkdown({ ...sampleSnapshot, grades: { course_id: 1, course_name: '물리', current_score: 90, current_grade: 'A', final_score: 85, final_grade: 'B+', assignments: [] } });
-  assert.match(md, /## 성적/);
-  assert.match(md, /현재 점수: 90/);
+  assert.ok(md.includes('90'));
+  assert.ok(md.includes('85'));
 });
 
 // Stubs for the orchestrator. Canvas calls return empty; Playwright-backed
@@ -120,6 +117,6 @@ test('exportCourseSnapshot writes file when output_path is given', async () => {
   assert.equal(result.local_path, path.resolve(outPath));
   assert.equal(result.snapshot, undefined);
   const written = await fs.readFile(outPath, 'utf8');
-  assert.match(written, /# 일반물리실험/);
+  assert.ok(written.includes(sampleSnapshot.course_name));
   await fs.rm(path.dirname(outPath), { recursive: true, force: true });
 });

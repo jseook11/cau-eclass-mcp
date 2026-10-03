@@ -488,9 +488,10 @@ test('submitAssignment refuses UI fallback for multi-file uploads', async () => 
   }
 });
 
-test('submitAssignment result does not include token, cookie, or file bytes', async () => {
+test('submitAssignment result does not expose credential values or file bytes', async () => {
   const { dir, filePath } = await makeTempFile();
-  const client = makeClient([rawAssignment()]);
+  const cookieValue = 'fixture-private-session-value';
+  const client = makeClient([rawAssignment({ cookie: cookieValue })]);
 
   try {
     const result = await submitAssignment(client as any, makeSession(), {
@@ -501,7 +502,7 @@ test('submitAssignment result does not include token, cookie, or file bytes', as
     const serialized = JSON.stringify(result);
 
     assert.equal(serialized.includes('secret-token'), false);
-    assert.equal(/cookie/i.test(serialized), false);
+    assert.equal(serialized.includes(cookieValue), false);
     assert.equal(serialized.includes('[1,2,3]'), false);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

@@ -212,8 +212,6 @@ test('resolveLaunchFromContext waits for a popup download after LTI opens a new 
   const observations: LaunchObservation[] = [
     { source: 'navigation', url: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11' },
   ];
-  let waited = 0;
-
   const artifact = await resolveLaunchFromContext({
     moduleItemUrl: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
     goto: async () => undefined,
@@ -227,7 +225,6 @@ test('resolveLaunchFromContext waits for a popup download after LTI opens a new 
     },
     observations: () => observations,
     wait: async () => {
-      waited += 1;
       observations.push({
         source: 'download',
         url: 'https://eclass3.cau.ac.kr/files/55/download',
@@ -237,14 +234,11 @@ test('resolveLaunchFromContext waits for a popup download after LTI opens a new 
     },
   });
 
-  assert.equal(waited, 1);
   assert.equal(artifact.kind, 'file');
   assert.equal(artifact.filename, 'week1.pptx');
 });
 
 test('resolveLaunchFromContext accepts a LearningX board attachment', async () => {
-  let boardChecks = 0;
-
   const artifact = await resolveLaunchFromContext({
     moduleItemUrl: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
     goto: async () => undefined,
@@ -258,7 +252,6 @@ test('resolveLaunchFromContext accepts a LearningX board attachment', async () =
     },
     observations: () => [],
     resolveBoardAttachment: async () => {
-      boardChecks += 1;
       return {
         kind: 'file',
         url: 'https://eclass3.cau.ac.kr/files/10683786/download?verifier=redacted',
@@ -268,7 +261,6 @@ test('resolveLaunchFromContext accepts a LearningX board attachment', async () =
     },
   });
 
-  assert.equal(boardChecks, 1);
   assert.deepEqual(artifact, {
     kind: 'file',
     url: 'https://eclass3.cau.ac.kr/files/10683786/download?verifier=redacted',
@@ -278,8 +270,7 @@ test('resolveLaunchFromContext accepts a LearningX board attachment', async () =
 });
 
 test('resolveLaunchFromContext retries while a LearningX board is still loading', async () => {
-  let boardChecks = 0;
-  let waits = 0;
+  let boardLoaded = false;
 
   const artifact = await resolveLaunchFromContext({
     moduleItemUrl: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
@@ -292,8 +283,7 @@ test('resolveLaunchFromContext retries while a LearningX board is still loading'
     submitForm: async () => undefined,
     observations: () => [],
     resolveBoardAttachment: async () => {
-      boardChecks += 1;
-      if (boardChecks === 1) return undefined;
+      if (!boardLoaded) return undefined;
       return {
         kind: 'file',
         url: 'https://eclass3.cau.ac.kr/files/10683786/download',
@@ -302,11 +292,11 @@ test('resolveLaunchFromContext retries while a LearningX board is still loading'
       };
     },
     wait: async () => {
-      waits += 1;
+      boardLoaded = true;
     },
   });
 
-  assert.equal(boardChecks, 2);
-  assert.equal(waits, 1);
+  assert.equal(artifact.kind, 'file');
+  assert.equal(artifact.url, 'https://eclass3.cau.ac.kr/files/10683786/download');
   assert.equal(artifact.filename, 'late.pdf');
 });

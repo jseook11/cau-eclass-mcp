@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CanvasClient } from '../src/canvas-client.js';
+import { CanvasApiError, CanvasClient } from '../src/canvas-client.js';
 
 test('CanvasClient sends repeated include parameters so material lock details are requested', async () => {
   const originalFetch = globalThis.fetch;
@@ -107,7 +107,7 @@ test('CanvasClient without onAuthError surfaces 401 directly', async () => {
 
   const client = new CanvasClient('https://eclass3.cau.ac.kr', 'token');
   try {
-    await assert.rejects(() => client.fetchOne('/api/v1/users/self'), /Canvas API error 401/);
+    await assert.rejects(() => client.fetchOne('/api/v1/users/self'), (err: unknown) => err instanceof CanvasApiError && err.status === 401);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -123,7 +123,7 @@ test('CanvasClient does not retry twice when refreshed token is also rejected', 
 
   const client = new CanvasClient('https://eclass3.cau.ac.kr', 'old', async () => 'new');
   try {
-    await assert.rejects(() => client.fetchOne('/api/v1/users/self'), /Canvas API error 401/);
+    await assert.rejects(() => client.fetchOne('/api/v1/users/self'), (err: unknown) => err instanceof CanvasApiError && err.status === 401);
     assert.equal(calls, 2);
   } finally {
     globalThis.fetch = originalFetch;
@@ -157,7 +157,7 @@ test('CanvasClient does not refresh on a course Files permission-denied 401', as
   try {
     await assert.rejects(
       () => client.fetchAll('/api/v1/courses/139260/files'),
-      /Canvas API error 401/,
+      (err: unknown) => err instanceof CanvasApiError && err.status === 401 && err.permissionDenied,
     );
     assert.equal(calls, 1);
     assert.equal(refreshed, 0);

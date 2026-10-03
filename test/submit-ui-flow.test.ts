@@ -3,24 +3,61 @@ import assert from 'node:assert/strict';
 
 import { BrowserSession } from '../src/browser-session.js';
 
-// PHASE5 §5: 모킹된 page로 UI 제출 셀렉터 순서 검증
-// (.submit_assignment_link → file input → comment → turnitin_pledge → 제출 버튼)
+interface Submission {
+  files: string[];
+  comment: string | undefined;
+  pledgeChecked: boolean;
+}
 
-function makeMockPage(events: string[]) {
+function makeMockPage() {
+  const state = {
+    url: '',
+    formOpen: false,
+    files: [] as string[],
+    comment: undefined as string | undefined,
+    pledgeChecked: false,
+    submissions: [] as Submission[],
+  };
+
   function makeLocator(name: string) {
     return {
       first() { return this; },
       async isVisible() { return true; },
-      async click() { events.push(`click:${name}`); },
-      async setInputFiles(files: string[]) { events.push(`files:${files.length}`); },
-      async fill(_value: string) { events.push(`fill:${name}`); },
-      async check() { events.push(`check:${name}`); },
+      async click() {
+        if (name === 'open') {
+          state.formOpen = true;
+        } else if (name === 'submit') {
+          assert.equal(state.formOpen, true, 'the submission form must be open');
+          assert.ok(state.files.length > 0, 'the files must be selected before submission');
+          assert.equal(state.pledgeChecked, true, 'the visible pledge must be accepted before submission');
+          state.submissions.push({
+            files: [...state.files],
+            comment: state.comment,
+            pledgeChecked: state.pledgeChecked,
+          });
+        }
+      },
+      async setInputFiles(files: string[]) {
+        assert.equal(name, 'file-input');
+        assert.equal(state.formOpen, true);
+        state.files = [...files];
+      },
+      async fill(value: string) {
+        assert.equal(name, 'comment');
+        assert.equal(state.formOpen, true);
+        state.comment = value;
+      },
+      async check() {
+        assert.equal(name, 'pledge');
+        assert.equal(state.formOpen, true);
+        state.pledgeChecked = true;
+      },
     };
   }
 
-  return {
-    async goto(_url: string) { events.push('goto'); },
-    url: () => 'https://eclass3.cau.ac.kr/courses/1/assignments/10',
+  const page = {
+    async goto(url: string) { state.url = url; },
+    url: () => state.url,
     isClosed: () => false,
     locator(selector: string) {
       if (selector.includes('submit_assignment_link')) return makeLocator('open');
@@ -32,11 +69,11 @@ function makeMockPage(events: string[]) {
     },
     waitForResponse: () => Promise.resolve({ ok: () => true, status: () => 200 }),
   };
+  return { page, state };
 }
 
-function makePatchedSession(events: string[]) {
+function makePatchedSession(page: ReturnType<typeof makeMockPage>['page']) {
   const session = new BrowserSession('tester', async () => 'pw');
-  const page = makeMockPage(events);
   (session as any).ensurePlaywrightReady = async () => {};
   (session as any).getClient = async () => ({});
   (session as any).withAuthenticatedContext = async (
@@ -47,33 +84,32 @@ function makePatchedSession(events: string[]) {
   return session;
 }
 
-test('submitAssignmentViaUi drives the confirmed selectors in order', async () => {
-  const events: string[] = [];
-  const session = makePatchedSession(events);
+test('submitAssignmentViaUi submits the requested files and comment after completing the form', async () => {
+  const { page, state } = makeMockPage();
+  const session = makePatchedSession(page);
+  const files = ['/tmp/report.pdf', '/tmp/appendix.pdf'];
 
-  await session.submitAssignmentViaUi(1, 10, ['/tmp/report.pdf'], '검토 부탁드립니다');
+  await session.submitAssignmentViaUi(1, 10, files, '검토 부탁드립니다');
 
-  assert.deepEqual(events, [
-    'goto',
-    'click:open',
-    'files:1',
-    'fill:comment',
-    'check:pledge',
-    'click:submit',
-  ]);
+  assert.equal(new URL(state.url).pathname, '/courses/1/assignments/10');
+  assert.equal(state.submissions.length, 1, 'the assignment must only be submitted once');
+  assert.deepEqual(state.submissions[0], {
+    files,
+    comment: '검토 부탁드립니다',
+    pledgeChecked: true,
+  });
 });
 
-test('submitAssignmentViaUi skips comment fill when no comment given', async () => {
-  const events: string[] = [];
-  const session = makePatchedSession(events);
+test('submitAssignmentViaUi submits without a comment when none is provided', async () => {
+  const { page, state } = makeMockPage();
+  const session = makePatchedSession(page);
 
   await session.submitAssignmentViaUi(1, 10, ['/tmp/report.pdf']);
 
-  assert.deepEqual(events, [
-    'goto',
-    'click:open',
-    'files:1',
-    'check:pledge',
-    'click:submit',
-  ]);
+  assert.equal(state.submissions.length, 1, 'the assignment must only be submitted once');
+  assert.deepEqual(state.submissions[0], {
+    files: ['/tmp/report.pdf'],
+    comment: undefined,
+    pledgeChecked: true,
+  });
 });

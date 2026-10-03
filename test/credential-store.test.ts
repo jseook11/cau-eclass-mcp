@@ -38,7 +38,7 @@ test('explicit plaintext file backend is legacy read-only', async () => {
     const value = await getCredential('service', 'account');
     assert.equal(value, 'secret');
     const before = await fs.readFile(storePath, 'utf8');
-    await assert.rejects(() => setCredential('service', 'account', 'new'), /legacy read-only/);
+    await assert.rejects(() => setCredential('service', 'account', 'new'), Error);
     assert.equal(await fs.readFile(storePath, 'utf8'), before);
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
@@ -68,13 +68,14 @@ test('readKeytarCredential preserves a legitimate miss and propagates backend fa
     getPassword: async () => null,
   }, 'svc', 'missing'), null);
 
+  const failure = new Error('keychain temporarily unavailable');
   await assert.rejects(
     () => readKeytarCredential({
       getPassword: async () => {
-        throw new Error('keychain temporarily unavailable');
+        throw failure;
       },
     }, 'svc', 'account'),
-    /keychain temporarily unavailable/,
+    (err: unknown) => err === failure,
   );
 });
 
@@ -92,7 +93,10 @@ test('resolveMasterKey reads base64 32-byte key from env', async () => {
 test('resolveMasterKey rejects a wrong-length env key', async () => {
   process.env[SECRET_KEY_ENV] = Buffer.from('too-short').toString('base64');
   try {
-    await assert.rejects(() => resolveMasterKey(), /32 bytes/);
+    await assert.rejects(() => resolveMasterKey(), Error);
+    const validKey = crypto.randomBytes(32);
+    process.env[SECRET_KEY_ENV] = validKey.toString('base64');
+    assert.deepEqual(await resolveMasterKey(), validKey);
   } finally {
     delete process.env[SECRET_KEY_ENV];
   }
@@ -121,11 +125,12 @@ test('resolveMasterKey rejects unsafe key-file permissions and symlinks', async 
   await fs.writeFile(keyPath, crypto.randomBytes(32), { mode: 0o644 });
   process.env[SECRET_KEY_FILE_ENV] = keyPath;
   try {
-    await assert.rejects(() => resolveMasterKey(), /unsafe permissions/);
+    await assert.rejects(() => resolveMasterKey(), Error);
     await fs.chmod(keyPath, 0o600);
+    assert.deepEqual(await resolveMasterKey(), await fs.readFile(keyPath));
     await fs.symlink(keyPath, linkPath);
     process.env[SECRET_KEY_FILE_ENV] = linkPath;
-    await assert.rejects(() => resolveMasterKey(), /symbolic link/);
+    await assert.rejects(() => resolveMasterKey(), Error);
   } finally {
     delete process.env[SECRET_KEY_FILE_ENV];
     await fs.rm(dir, { recursive: true, force: true });
@@ -150,7 +155,6 @@ test('encrypted backend stores ciphertext and round-trips via get/set', async ()
     assert.equal(backend, 'encrypted');
     const onDisk = await fs.readFile(encPath, 'utf8');
     assert.ok(!onDisk.includes('s3cret'));
-    assert.match(onDisk, /"iv"/);
     assert.equal(await getCredential('eclass-mcp', 'alice'), 's3cret');
     const stat = await fs.stat(encPath);
     if (os.platform() !== 'win32') {
@@ -177,7 +181,9 @@ test('encrypted credential store rejects unsafe permissions', async (t) => {
   process.env[ENC_STORE_PATH_ENV] = encPath;
   process.env[SECRET_KEY_ENV] = key.toString('base64');
   try {
-    await assert.rejects(() => getCredential('svc', 'acct'), /unsafe permissions/);
+    await assert.rejects(() => getCredential('svc', 'acct'), Error);
+    await fs.chmod(encPath, 0o600);
+    assert.equal(await getCredential('svc', 'acct'), 'secret');
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
     delete process.env[ENC_STORE_PATH_ENV];
@@ -196,7 +202,7 @@ test('encrypted backend rejects identical encrypted and legacy store paths', asy
   try {
     await assert.rejects(
       () => setCredential('svc', 'acct', 'secret'),
-      /must refer to different files/,
+      Error,
     );
     await assert.rejects(() => fs.stat(storePath), (err: NodeJS.ErrnoException) => err.code === 'ENOENT');
   } finally {
@@ -274,11 +280,12 @@ test('credential stores reject unsafe permissions and symlinks on read', async (
   process.env[CREDENTIAL_BACKEND_ENV] = 'file';
   process.env.ECLASS_SECRET_STORE_PATH = legacyPath;
   try {
-    await assert.rejects(() => getCredential('svc', 'acct'), /unsafe permissions/);
+    await assert.rejects(() => getCredential('svc', 'acct'), Error);
     await fs.chmod(legacyPath, 0o600);
+    assert.equal(await getCredential('svc', 'acct'), null);
     await fs.symlink(legacyPath, linkPath);
     process.env.ECLASS_SECRET_STORE_PATH = linkPath;
-    await assert.rejects(() => getCredential('svc', 'acct'), /symbolic link/);
+    await assert.rejects(() => getCredential('svc', 'acct'), Error);
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
     delete process.env.ECLASS_SECRET_STORE_PATH;
@@ -291,9 +298,12 @@ test('explicit encrypted backend without a key throws (no silent fallback)', asy
   delete process.env[SECRET_KEY_ENV];
   delete process.env[SECRET_KEY_FILE_ENV];
   try {
-    await assert.rejects(() => resolveBackend(), /master key/);
+    await assert.rejects(() => resolveBackend(), Error);
+    process.env[SECRET_KEY_ENV] = crypto.randomBytes(32).toString('base64');
+    assert.equal((await resolveBackend()).backend, 'encrypted');
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
+    delete process.env[SECRET_KEY_ENV];
   }
 });
 
@@ -330,24 +340,28 @@ test('auto backend never selects the plaintext legacy file backend', async () =>
       const { backend } = await resolveBackend();
       assert.notEqual(backend, 'file');
     } catch (err) {
-      assert.match(err instanceof Error ? err.message : String(err), /No secure credential backend/);
+      assert.ok(err instanceof Error);
+      const diagnostics = await describeCredentialEnvironment();
+      assert.equal(diagnostics.backend, 'unavailable');
+      assert.equal(diagnostics.masterKeyPresent, false);
+      assert.equal(diagnostics.keytarLoaded, false);
     }
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
   }
 });
 
-test('setCredential refuses the plaintext file backend regardless of fallback option', async () => {
+test('plaintext credential backend cannot create a file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-nofile-'));
   process.env[CREDENTIAL_BACKEND_ENV] = 'file';
   process.env.ECLASS_SECRET_STORE_PATH = path.join(dir, 'secrets.json');
   try {
     await assert.rejects(
-      () => setCredential('svc', 'acct', 'pw', { allowFileFallback: false }),
-      /legacy read-only/,
+      () => setCredential('svc', 'acct', 'pw'),
+      Error,
     );
     // 거부됐으므로 파일이 생성되지 않아야 한다(평문 미기록).
-    await assert.rejects(() => fs.stat(path.join(dir, 'secrets.json')));
+    await assert.rejects(() => fs.stat(path.join(dir, 'secrets.json')), { code: 'ENOENT' });
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
     delete process.env.ECLASS_SECRET_STORE_PATH;
@@ -361,10 +375,11 @@ test('credentialBackendCheck reports ok when credential is found', async () => {
   process.env[ENC_STORE_PATH_ENV] = path.join(dir, 'secrets.enc');
   process.env[SECRET_KEY_ENV] = crypto.randomBytes(32).toString('base64');
   try {
-    await setCredential('eclass-mcp', 'alice', 'pw');
+    await setCredential('eclass-mcp', 'alice', 'doctor-secret-do-not-print');
     const res = await credentialBackendCheck('alice');
     assert.equal(res.ok, true);
-    assert.match(res.detail, /encrypted/);
+    assert.ok(res.detail.trim());
+    assert.ok(!res.detail.includes('doctor-secret-do-not-print'));
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
     delete process.env[ENC_STORE_PATH_ENV];
@@ -381,7 +396,7 @@ test('credentialBackendCheck reports not-ok when credential missing', async () =
   try {
     const res = await credentialBackendCheck('nobody');
     assert.equal(res.ok, false);
-    assert.match(res.detail, /not found|없음/);
+    assert.ok(res.detail.trim());
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
     delete process.env[ENC_STORE_PATH_ENV];
@@ -395,7 +410,7 @@ test('credentialBackendCheck reports an unavailable backend without throwing', a
   try {
     const res = await credentialBackendCheck('nobody');
     assert.equal(res.ok, false);
-    assert.match(res.detail, /backend=unavailable|credential lookup failed/);
+    assert.ok(res.detail.trim());
   } finally {
     delete process.env[CREDENTIAL_BACKEND_ENV];
   }

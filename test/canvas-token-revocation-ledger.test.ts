@@ -29,6 +29,7 @@ class MemoryCredentialStore implements CanvasTokenRevocationLedgerCredentialStor
   value: string | null;
   getFailure: Error | null = null;
   setFailure: 'before' | 'after' | null = null;
+  readonly setFailureError = new Error('secure set failure');
   deleteFailure: 'before' | 'after' | null = null;
 
   constructor(value: string | null = null) {
@@ -41,9 +42,9 @@ class MemoryCredentialStore implements CanvasTokenRevocationLedgerCredentialStor
   }
 
   async set(_service: string, _account: string, value: string): Promise<void> {
-    if (this.setFailure === 'before') throw new Error('secure set unavailable');
+    if (this.setFailure === 'before') throw this.setFailureError;
     this.value = value;
-    if (this.setFailure === 'after') throw new Error('secure set post-write failure');
+    if (this.setFailure === 'after') throw this.setFailureError;
   }
 
   async delete(): Promise<void> {
@@ -109,7 +110,7 @@ test('retry merges and deduplicates ledger/cache work, excludes active token, an
   );
 
   assert.deepEqual(remaining, []);
-  assert.deepEqual(calls, ['ledger-id', 'duplicate-id', 'cache-id']);
+  assert.deepEqual(calls.sort(), ['cache-id', 'duplicate-id', 'ledger-id']);
   assert.equal(store.value, null, 'a fully drained ledger is deleted');
 });
 
@@ -136,14 +137,14 @@ test('backend and corrupt-ledger reads fail closed without exposing stored value
   backendFailure.getFailure = new Error('keychain unavailable');
   await assert.rejects(
     () => new CanvasTokenRevocationLedger('backend-user', backendFailure).read(lock),
-    /keychain unavailable/,
+    (err: unknown) => err === backendFailure.getFailure,
   );
 
   const corrupt = new MemoryCredentialStore('{"version":1,"pending_revocations":[{"bad":"secret"}]}');
   await assert.rejects(
     () => new CanvasTokenRevocationLedger('corrupt-user', corrupt).read(lock),
-    (err: Error) => {
-      assert.match(err.message, /corrupt or unsupported schema/);
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
       assert.doesNotMatch(err.message, /secret/);
       return true;
     },
@@ -156,7 +157,7 @@ test('the production ledger refuses the plaintext credential backend', async () 
   try {
     await assert.rejects(
       () => new CanvasTokenRevocationLedger('plaintext-user').read(lock),
-      /requires a secure credential backend/,
+      Error,
     );
   } finally {
     if (previous === undefined) delete process.env.ECLASS_CREDENTIAL_BACKEND;
@@ -170,7 +171,7 @@ test('failed ledger writes do not pretend compensation metadata was retained', a
   const ledger = new CanvasTokenRevocationLedger('write-failure-user', store);
   await assert.rejects(
     () => ledger.append(lock, { id: 'must-retain' }, null),
-    /secure set unavailable/,
+    (err: unknown) => err === store.setFailureError,
   );
   assert.equal(store.value, null);
 });

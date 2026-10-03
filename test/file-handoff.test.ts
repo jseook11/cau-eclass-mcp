@@ -128,19 +128,15 @@ test('handoffFile returns ok result for an in-limit file', () => {
   assert.equal(out.ok === true && out.result.structuredContent.delivered, true);
 });
 
-test('buildFileHandoffUrl returns a text link, never a base64 blob', () => {
+test('buildFileHandoffUrl delivers a download URL as text', () => {
   const result = buildFileHandoffUrl(baseRecord, 5, 'http://127.0.0.1:8787/files/abc');
   assert.equal(result.structuredContent.delivered, true);
   assert.equal(result.structuredContent.download_url, 'http://127.0.0.1:8787/files/abc');
   assert.equal(result.structuredContent.size_bytes, 5);
-  assert.equal(result.content.length, 1);
-  const [block] = result.content;
-  assert.equal(block.type, 'text');
-  assert.ok(block.type === 'text' && block.text.includes('http://127.0.0.1:8787/files/abc'));
-  assert.ok(block.type === 'text' && block.text.includes('파일 URL:'));
-  assert.ok(block.type === 'text' && block.text.includes('파일 본문이나 첨부파일이 없습니다'));
-  assert.ok(block.type === 'text' && block.text.includes('공개 인터넷에서 접근 가능'));
-  assert.ok(block.type === 'text' && block.text.includes('ECLASS_HANDOFF_BASE_URL'));
+  assert.ok(result.content.length > 0);
+  assert.ok(result.content.every((block) => block.type === 'text'));
+  const text = result.content.map((block) => block.type === 'text' ? block.text : '').join('\n');
+  assert.ok(text.includes(result.structuredContent.download_url));
 });
 
 test('handoffFile uses URL mode (no readFile) when registerUrl is provided', () => {

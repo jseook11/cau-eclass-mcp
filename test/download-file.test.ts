@@ -6,14 +6,20 @@ import * as path from 'node:path';
 
 import { downloadFile, validateCachedDownload } from '../src/tools/download-file.js';
 
-test('validateCachedDownload never aliases distinct source IDs by a repeated title', async () => {
-  const result = await validateCachedDownload({
-    get: (id: string) => { assert.equal(id, 'week-2-source-id'); return null; },
-    findByName: () => { throw new Error('a repeated title must not be queried for cache identity'); },
-    record: () => { throw new Error('another ID must not be registered as the same download'); },
-  }, { file_id: 'week-2-source-id', course_id: 1, display_name: '강의 슬라이드' });
-
-  assert.equal(result, null);
+test('validateCachedDownload rejects another source ID with the same title', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'download-cache-same-title-'));
+  const localPath = path.join(dir, 'other.pdf');
+  await fs.writeFile(localPath, 'pdf');
+  try {
+    const result = await validateCachedDownload({
+      get: () => null,
+      findByName: () => ({ file_id: 'week-1-source-id', course_id: 1, display_name: '강의 슬라이드', local_path: localPath, size_bytes: 3 }),
+      record: () => { throw new Error('another ID must not be registered as the same download'); },
+    }, { file_id: 'week-2-source-id', course_id: 1, display_name: '강의 슬라이드' });
+    assert.equal(result, null);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('validateCachedDownload requires the requested course and known source for an exact ID hit', async () => {
@@ -21,7 +27,7 @@ test('validateCachedDownload requires the requested course and known source for 
   const localPath = path.join(dir, 'slides.pdf');
   await fs.writeFile(localPath, 'pdf');
   const record = { local_path: localPath, size_bytes: 3, course_id: 1, source: 'files' };
-  const cache = { get: () => record, findByName: () => { throw new Error('must not search by title'); }, record: () => {} };
+  const cache = { get: () => record, findByName: () => record, record: () => {} };
   const item = { file_id: '55', course_id: 1, source: 'files', display_name: '강의 슬라이드' };
   try {
     assert.equal(await validateCachedDownload(cache, { ...item, course_id: 2 }), null);

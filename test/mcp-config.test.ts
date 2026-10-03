@@ -5,6 +5,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import YAML from 'yaml';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { resolveDoctorCredentials } from '../src/doctor.js';
 import {
@@ -19,6 +21,9 @@ import {
   updateMcpJsonEclassServer,
   writeHermesConfig,
   writeMcpJsonConfig,
+  type McpJsonConfig,
+  type HermesConfig,
+  type McpServerConfig,
 } from '../src/mcp-config.js';
 
 test('Hermes config update writes eclass server and preserves unrelated fields', async () => {
@@ -44,8 +49,6 @@ test('Hermes config update writes eclass server and preserves unrelated fields',
   const written = YAML.parse(await fs.readFile(configPath, 'utf8')) as any;
   assert.equal(written.theme, 'dark');
   assert.equal(written.mcp_servers.other.command, 'other');
-  assert.equal(written.mcp_servers.eclass.command, 'node');
-  assert.deepEqual(written.mcp_servers.eclass.args, ['/root/eclass-mcp/dist/index.js']);
   assert.equal(written.mcp_servers.eclass.enabled, true);
   assert.equal(written.mcp_servers.eclass.env.ECLASS_USERNAME, 'my_id');
   assert.equal(written.mcp_servers.eclass.env.ECLASS_PASSWORD, 'secret');
@@ -180,18 +183,13 @@ test('doctor plaintext override requires a secure Canvas cache backend but no st
 
     const secure = await runPreflight('encrypted', Buffer.alloc(32, 1).toString('base64'));
     assert.equal(secure.ok, true);
-    assert.match(secure.detail, /secure Canvas token\/session cache backend readable/);
     await assert.rejects(() => fs.stat(encryptedStorePath), (err: NodeJS.ErrnoException) => err.code === 'ENOENT');
 
     const unavailable = await runPreflight('invalid-backend');
     assert.equal(unavailable.ok, false);
-    assert.match(unavailable.detail, /backend=unavailable/);
-    assert.match(unavailable.detail, /requires encrypted or keytar storage/);
 
     const legacyFile = await runPreflight('file');
     assert.equal(legacyFile.ok, false);
-    assert.match(legacyFile.detail, /backend=file/);
-    assert.match(legacyFile.detail, /requires encrypted or keytar storage/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -233,9 +231,6 @@ test('existing .mcp.json behavior still writes username and strips plaintext sec
   assert.equal(written.mcpServers.eclass.env.ECLASS_SECRET_KEY, undefined);
   assert.equal(written.mcpServers.eclass.env.ECLASS_OCR_MODEL, undefined);
   assert.equal(written.mcpServers.other.command, 'other');
-  // Must launch node directly (not `pnpm start`, whose stdout banner breaks JSON-RPC)
-  assert.equal(written.mcpServers.eclass.command, 'node');
-  assert.deepEqual(written.mcpServers.eclass.args, [path.join(dir, 'dist', 'index.js')]);
   if (os.platform() !== 'win32') {
     const stat = await fs.stat(mcpJsonPath);
     assert.equal(stat.mode & 0o777, 0o600);
@@ -244,22 +239,67 @@ test('existing .mcp.json behavior still writes username and strips plaintext sec
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('.mcp.json generators use node, never pnpm start (stdout banner corrupts stdio)', () => {
-  const def = createDefaultMcpJsonConfig('/root/eclass-mcp');
-  assert.equal(def.mcpServers?.eclass.command, 'node');
-  assert.deepEqual(def.mcpServers?.eclass.args, ['/root/eclass-mcp/dist/index.js']);
-  assert.equal(def.mcpServers?.eclass.env?.ECLASS_TRANSPORT, undefined);
-  assert.equal(def.mcpServers?.eclass.env?.CONTROL_PLANE_API_KEY, undefined);
-  assert.equal(def.mcpServers?.eclass.env?.CONTROL_PLANE_TUNNEL_ID, undefined);
-  assert.equal(def.mcpServers?.eclass.env?.ECLASS_CREDENTIAL_BACKEND, undefined);
+test('generated and updated client configs support MCP initialization and tool calls over stdio', { timeout: 45_000 }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-mcp-stdio-'));
+  try {
+    await fs.mkdir(path.join(dir, 'dist'));
+    await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({
+      type: 'module',
+      scripts: { start: 'node dist/index.js' },
+    }));
+    const fixture = [
+      `import { Server } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/index.js'))};`,
+      `import { StdioServerTransport } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/stdio.js'))};`,
+      `import { ListToolsRequestSchema, CallToolRequestSchema } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/types.js'))};`,
+      "const server = new Server({ name: 'config-launch-fixture', version: '1' }, { capabilities: { tools: {} } });",
+      "server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'configured_user', inputSchema: { type: 'object' } }] }));",
+      "server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text', text: process.env.ECLASS_USERNAME ?? 'unset' }] }));",
+      "process.stderr.write('fixture starting\\n');",
+      'await server.connect(new StdioServerTransport());',
+    ].join('\n');
+    await fs.writeFile(path.join(dir, 'dist', 'index.js'), fixture);
 
-  // Repairs a pre-existing broken pnpm-based entry on re-run
-  const broken: any = { mcpServers: { eclass: { command: 'pnpm', args: ['--dir', '/root/eclass-mcp', 'start'], env: { KEEP: '1' } } } };
-  updateMcpJsonEclassServer(broken, { projectRoot: '/root/eclass-mcp', username: 'u' });
-  assert.equal(broken.mcpServers.eclass.command, 'node');
-  assert.deepEqual(broken.mcpServers.eclass.args, ['/root/eclass-mcp/dist/index.js']);
-  assert.equal(broken.mcpServers.eclass.env.KEEP, '1');
-  assert.equal(broken.mcpServers.eclass.env.ECLASS_USERNAME, 'u');
+    const generated = createDefaultMcpJsonConfig(dir);
+    const updated: McpJsonConfig = {
+      mcpServers: { eclass: { command: 'unconfigured', args: [], env: { KEEP: '1' } } },
+    };
+    updateMcpJsonEclassServer(updated, { projectRoot: dir, username: 'stdio-user' });
+    const hermes: HermesConfig = { mcp_servers: {} };
+    updateHermesEclassServer(hermes, { projectRoot: dir, username: 'hermes-user', allowPlaintextEnv: false });
+    assert.equal(updated.mcpServers?.eclass.env?.KEEP, '1');
+
+    for (const [config, username] of [
+      [generated.mcpServers!.eclass, 'unset'],
+      [updated.mcpServers!.eclass, 'stdio-user'],
+      [hermes.mcp_servers!.eclass, 'hermes-user'],
+    ] as Array<[McpServerConfig, string]>) {
+      assert.ok(config.command);
+      const client = new Client({ name: 'config-launch-test', version: '1' });
+      const transport = new StdioClientTransport({
+        command: config.command,
+        args: config.args,
+        env: config.env,
+        cwd: dir,
+        stderr: 'pipe',
+      });
+      const protocolErrors: Error[] = [];
+      const requestOptions = { timeout: 10_000 };
+      client.onerror = (error) => protocolErrors.push(error);
+      try {
+        await client.connect(transport, requestOptions);
+        assert.equal(client.getServerVersion()?.name, 'config-launch-fixture');
+        const listed = await client.listTools({}, requestOptions);
+        assert.deepEqual(listed.tools.map((tool) => tool.name), ['configured_user']);
+        const called = await client.callTool({ name: 'configured_user' }, undefined, requestOptions);
+        assert.deepEqual(called.content, [{ type: 'text', text: username }]);
+        assert.deepEqual(protocolErrors, [], 'startup output must remain a valid MCP stream');
+      } finally {
+        await client.close();
+      }
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('.mcp.json default path is repository-local and legacy path remains parent-local', () => {

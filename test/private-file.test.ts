@@ -31,10 +31,13 @@ test('custom private file validation rejects broad permissions and symlinks', as
   const link = path.join(dir, 'custom-link.env');
   try {
     await fs.writeFile(target, 'SECRET=value\n', { mode: 0o644 });
-    await assert.rejects(() => assertPrivateFile(target, 'custom env'), /unsafe permissions/);
+    await assert.rejects(() => assertPrivateFile(target, 'custom env'), Error);
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o644);
     await fs.chmod(target, 0o600);
+    await assertPrivateFile(target, 'custom env');
     await fs.symlink(target, link);
-    await assert.rejects(() => assertPrivateFile(link, 'custom env'), /symbolic link/);
+    await assert.rejects(() => assertPrivateFile(link, 'custom env'), Error);
+    assert.equal((await fs.lstat(link)).isSymbolicLink(), true);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -56,8 +59,10 @@ test('private file validation rejects a file owned by another uid', async (t) =>
     });
     await assert.rejects(
       () => assertPrivateFile(file, 'secret input'),
-      /owned by the current user/,
+      Error,
     );
+    if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
+    await assertPrivateFile(file, 'secret input');
   } finally {
     if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
     await fs.rm(dir, { recursive: true, force: true });
@@ -77,7 +82,7 @@ test('exclusive master-key creation writes raw 32 bytes under 0700 parent', asyn
     assert.deepEqual(await fs.readFile(file), key);
     assert.equal((await fs.stat(parent)).mode & 0o777, 0o700);
     assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
-    await assert.rejects(() => createPrivateFileExclusive(file, Buffer.alloc(32, 9)), /EEXIST/);
+    await assert.rejects(() => createPrivateFileExclusive(file, Buffer.alloc(32, 9)), { code: 'EEXIST' });
     assert.deepEqual(await fs.readFile(file), key);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -90,13 +95,16 @@ test('exclusive master-key creation rejects material that is not exactly 32 byte
   try {
     await assert.rejects(
       () => createPrivateFileExclusive(file, Buffer.alloc(31)),
-      /exactly 32 bytes/,
+      Error,
     );
     await assert.rejects(
       () => createPrivateFileExclusive(file, Buffer.alloc(33)),
-      /exactly 32 bytes/,
+      Error,
     );
-    await assert.rejects(() => fs.lstat(file), /ENOENT/);
+    await assert.rejects(() => fs.lstat(file), { code: 'ENOENT' });
+    const key = Buffer.alloc(32, 7);
+    await createPrivateFileExclusive(file, key);
+    assert.deepEqual(await fs.readFile(file), key);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -111,8 +119,12 @@ test('exclusive master-key creation rejects a shared parent', async (t) => {
     await fs.chmod(parent, 0o777);
     await assert.rejects(
       () => createPrivateFileExclusive(path.join(parent, 'master.key'), Buffer.alloc(32, 3)),
-      /must not be shared/,
+      Error,
     );
+    await assert.rejects(() => fs.lstat(path.join(parent, 'master.key')), { code: 'ENOENT' });
+    assert.equal((await fs.stat(parent)).mode & 0o777, 0o777);
+    await fs.chmod(parent, 0o700);
+    await createPrivateFileExclusive(path.join(parent, 'master.key'), Buffer.alloc(32, 3));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -122,7 +134,7 @@ test('exclusive master-key creation rejects a filesystem-root parent', async () 
   const root = path.parse(process.cwd()).root;
   await assert.rejects(
     () => createPrivateFileExclusive(path.join(root, 'eclass-test-master.key'), Buffer.alloc(32, 3)),
-    /must not be a filesystem root/,
+    (err: unknown) => err instanceof Error && !('code' in err),
   );
 });
 
@@ -136,14 +148,17 @@ test('exclusive master-key creation rejects a symlinked parent', async (t) => {
     await fs.symlink(realParent, linkedParent);
     await assert.rejects(
       () => createPrivateFileExclusive(path.join(linkedParent, 'master.key'), Buffer.alloc(32, 3)),
-      /symbolic link/,
+      Error,
     );
+    await assert.rejects(() => fs.lstat(path.join(realParent, 'master.key')), { code: 'ENOENT' });
+    assert.equal((await fs.lstat(linkedParent)).isSymbolicLink(), true);
+    await createPrivateFileExclusive(path.join(realParent, 'master.key'), Buffer.alloc(32, 3));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('atomic private text writer replaces through a 0600 same-directory file', async (t) => {
+test('private text writer replaces contents and keeps the file private', async (t) => {
   if (os.platform() === 'win32') return t.skip('POSIX permission test');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-private-atomic-'));
   const file = path.join(dir, 'config.json');

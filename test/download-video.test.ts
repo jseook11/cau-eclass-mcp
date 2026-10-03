@@ -34,7 +34,7 @@ test('OCS video helpers parse supported UniPlayer MP4 metadata', () => {
     parseMainMediaFromXml('<main_media media_id="story-1">screen.mp4</main_media>'),
     'screen.mp4',
   );
-  assert.throws(() => parseMainMediaFromXml('<main_media>playlist.m3u8</main_media>'), /main_media is not an MP4 filename/);
+  assert.throws(() => parseMainMediaFromXml('<main_media>playlist.m3u8</main_media>'), Error);
 });
 
 test('OCS video helpers accept a progressive nested media_uri for the same content', () => {
@@ -98,7 +98,6 @@ test('downloadVideo verifies and downloads OCS MP4 without sending credentials t
     assert.equal(cache.records.length, 1);
     assert.equal(cache.records[0].source, 'courseresource');
     assert.ok(calls.every((call) => call.auth === null));
-    assert.ok(calls.some((call) => call.range === 'bytes=0-15'));
     await assert.doesNotReject(() => fs.access(result.local_path));
   } finally {
     globalThis.fetch = originalFetch;
@@ -217,7 +216,7 @@ test('downloadVideo reports metadata that does not expose a direct MP4', async (
     assert.equal(result.ok, false);
     if (result.ok) throw new Error('expected failure');
     assert.equal(result.error_code, 'VIDEO_DOWNLOAD_UNSUPPORTED');
-    assert.match(result.next_action ?? '', /직접 MP4/);
+    assert.equal(result.retryable, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

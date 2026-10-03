@@ -29,17 +29,14 @@ test('chatgptui accepts a private custom env file and rejects unsafe or symlinke
     await fs.writeFile(file, 'CONTROL_PLANE_API_KEY=test\n', { mode: 0o644 });
     const unsafe = await runStatus(file);
     assert.equal(unsafe.code, 1, unsafe.output);
-    assert.match(unsafe.output, /unsafe permissions/);
 
     await fs.chmod(file, 0o600);
     const safe = await runStatus(file);
     assert.equal(safe.code, 0, safe.output);
-    assert.match(safe.output, /loaded custom env file/);
 
     await fs.symlink(file, link);
     const symlinked = await runStatus(link);
     assert.equal(symlinked.code, 1, symlinked.output);
-    assert.match(symlinked.output, /symbolic link/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

@@ -134,9 +134,13 @@ test('waiting on a live credential-store owner has a bounded timeout', async () 
         pollMs: 5,
         staleMs: 20,
       }),
-      /Timed out waiting for encrypted credential-store lock/,
+      Error,
     );
     await first.assertOwned();
+    await first.release();
+    const next = await acquireCredentialStoreLock(storePath, { timeoutMs: 1_000, pollMs: 5, staleMs: 20 });
+    await next.assertOwned();
+    await next.release();
   } finally {
     await first.release();
     await fs.rm(temp, { recursive: true, force: true });
@@ -222,13 +226,16 @@ test('two child-process set transactions preserve unrelated encrypted accounts',
   }
 });
 
-test('child-process delete then set transactions serialize in queue order', async (t) => {
+test('concurrent child-process delete and set preserve both account changes', async (t) => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-credential-rmw-delete-set-'));
   const storePath = path.join(temp, 'secrets.enc');
   const legacyPath = path.join(temp, 'secrets.json');
   const key = crypto.randomBytes(32);
   await fs.writeFile(storePath, `${JSON.stringify(encryptSecretFile(key, {
-    [encoded('svc')]: { [encoded('target')]: 'initial' },
+    [encoded('svc')]: {
+      [encoded('deleted')]: 'initial',
+      [encoded('unchanged')]: 'keep-me',
+    },
   }))}\n`, { mode: 0o600 });
   const env = credentialChildEnv(storePath, key, legacyPath);
   const moduleUrl = pathToFileURL(path.resolve('src/credential-store.ts')).href;
@@ -239,7 +246,7 @@ test('child-process delete then set transactions serialize in queue order', asyn
   });
   const deleting = spawnScript([
     `import { deleteCredential } from ${JSON.stringify(moduleUrl)};`,
-    `await deleteCredential('svc', 'target');`,
+    `await deleteCredential('svc', 'deleted');`,
     `process.stdout.write('done\\n');`,
   ].join('\n'), env);
   t.after(() => deleting.child.kill('SIGKILL'));
@@ -249,7 +256,7 @@ test('child-process delete then set transactions serialize in queue order', asyn
     await waitUntil(async () => await readyCandidateCount(owner.bucketPath) === 2);
     setting = spawnScript([
       `import { setCredential } from ${JSON.stringify(moduleUrl)};`,
-      `await setCredential('svc', 'target', 'replacement');`,
+      `await setCredential('svc', 'created', 'replacement');`,
       `process.stdout.write('done\\n');`,
     ].join('\n'), env);
     t.after(() => setting?.child.kill('SIGKILL'));
@@ -257,14 +264,16 @@ test('child-process delete then set transactions serialize in queue order', asyn
     assert.equal(deleting.stdout(), '');
     assert.equal(setting.stdout(), '');
     assert.equal(
-      (await readEncryptedStore(storePath, key))[encoded('svc')]?.[encoded('target')],
+      (await readEncryptedStore(storePath, key))[encoded('svc')]?.[encoded('deleted')],
       'initial',
     );
 
     await owner.release();
     await Promise.all([assertChildSucceeded(deleting), assertChildSucceeded(setting)]);
     const stored = await readEncryptedStore(storePath, key);
-    assert.equal(stored[encoded('svc')]?.[encoded('target')], 'replacement');
+    assert.equal(stored[encoded('svc')]?.[encoded('deleted')], undefined);
+    assert.equal(stored[encoded('svc')]?.[encoded('created')], 'replacement');
+    assert.equal(stored[encoded('svc')]?.[encoded('unchanged')], 'keep-me');
   } finally {
     await owner.release();
     deleting.child.kill('SIGKILL');

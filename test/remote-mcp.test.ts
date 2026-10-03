@@ -43,8 +43,8 @@ test('buildToolList adds standard search/fetch tools and annotations', () => {
   ]);
 
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  assert.equal(byName.get('search')?.inputSchema.required?.[0], 'query');
-  assert.equal(byName.get('fetch')?.inputSchema.required?.[0], 'id');
+  assert.ok(byName.get('search')?.inputSchema.required?.includes('query'));
+  assert.ok(byName.get('fetch')?.inputSchema.required?.includes('id'));
   assert.equal(byName.get('eclass_get_courses_cached')?.annotations?.readOnlyHint, true);
   assert.equal(byName.get('eclass_submit_assignment')?.annotations?.readOnlyHint, false);
   assert.equal(byName.get('eclass_submit_assignment')?.annotations?.destructiveHint, true);
@@ -116,7 +116,8 @@ test('announcement output schemas require course provenance and expose attachmen
   })));
   const announcements = tools.find((tool) => tool.name === 'eclass_get_announcements')!.outputSchema!;
   const announcementProps = announcements.properties as { result: { items: { required: string[] } } };
-  assert.deepEqual(announcementProps.result.items.required, ['id', 'course_id']);
+  assert.ok(announcementProps.result.items.required.includes('id'));
+  assert.ok(announcementProps.result.items.required.includes('course_id'));
 
   const materials = tools.find((tool) => tool.name === 'eclass_get_materials')!.outputSchema!;
   const materialProps = materials.properties as { materials: { items: { properties: Record<string, { type: string }> } } };

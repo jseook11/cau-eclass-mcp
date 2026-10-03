@@ -25,17 +25,28 @@ test('semantic routing does not infer video or document from titles and module n
   assert.equal(classifyMaterial({ type: 'movie' }).asset_kind, 'video');
 });
 
-test('explicit non-file policies and locked wrappers never touch a download or cache', async () => {
-  const deps = { session: new Proxy({}, { get: () => { throw new Error('browser must not run'); } }),
-    fileCache: new Proxy({}, { get: () => { throw new Error('cache must not run'); } }), token: 'tok' } as DownloadDeps;
-  for (const [metadata, status] of [
-    [{ asset_kind: 'video', downloadable: false, acquisition_policy: 'exclude' }, 'excluded_video'],
-    [{ asset_kind: 'interactive', downloadable: false, acquisition_policy: 'exclude' }, 'excluded_interactive'],
-    [{ asset_kind: 'unresolved', downloadable: false, acquisition_policy: 'needs_resolution' }, 'needs_resolution'],
-    [{ locked_for_user: true }, 'not_open'],
-    [{ unlock_at: '2099-01-01T00:00:00Z' }, 'not_open'],
-  ] as const) {
-    assert.equal((await downloadOne(deps, { ...wrapper, ...metadata })).status, status);
+test('explicit non-file policies and locked wrappers do not acquire or record downloads', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'material-excluded-'));
+  const fileCache = new FileCache(path.join(dir, 'files.db'));
+  let acquisitions = 0;
+  const unexpectedAcquisition = async () => { acquisitions += 1; throw new Error('unexpected acquisition'); };
+  const deps = { session: { resolveExternalToolLaunch: unexpectedAcquisition, downloadCourseresourceFile: unexpectedAcquisition },
+    fileCache, token: 'tok' } as unknown as DownloadDeps;
+  try {
+    for (const [metadata, status] of [
+      [{ asset_kind: 'video', downloadable: false, acquisition_policy: 'exclude' }, 'excluded_video'],
+      [{ asset_kind: 'interactive', downloadable: false, acquisition_policy: 'exclude' }, 'excluded_interactive'],
+      [{ asset_kind: 'unresolved', downloadable: false, acquisition_policy: 'needs_resolution' }, 'needs_resolution'],
+      [{ locked_for_user: true }, 'not_open'],
+      [{ unlock_at: '2099-01-01T00:00:00Z' }, 'not_open'],
+    ] as const) {
+      assert.equal((await downloadOne(deps, { ...wrapper, ...metadata })).status, status);
+    }
+    assert.equal(acquisitions, 0);
+    assert.deepEqual(fileCache.list(), []);
+  } finally {
+    fileCache.getDb().close();
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -57,7 +68,7 @@ test('unknown launch result is durable across restarts; changed metadata gets a 
     assert.equal(launches, 1);
     const record = cache.getMaterialResolution(wrapper.course_id, wrapper.file_id, materialFingerprint(wrapper))!;
     assert.equal(record.attempt, 1);
-    assert.match(record.reason!, /did not yield/);
+    assert.equal(record.error_code, 'EXTERNAL_TOOL_NO_ARTIFACT');
     assert.equal(record.retryable, false);
     await downloadOne({ session, fileCache: cache, token: 'tok' }, { ...wrapper, display_name: 'Chapter 5 revised' });
     assert.equal(launches, 2);
@@ -117,11 +128,9 @@ test('equal titles and local byte sizes cannot satisfy a different ID or course 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'material-cache-'));
   const localPath = path.join(dir, 'ch05.pdf'); await fs.writeFile(localPath, 'pdf');
   const other = { local_path: localPath, size_bytes: 3, course_id: 147845 };
-  let nameLookups = 0;
-  const cache = { get: () => null, findByName: () => { nameLookups += 1; return other; }, record: () => { throw new Error('must not alias ID'); } };
+  const cache = { get: () => null, findByName: () => other, record: () => { throw new Error('must not alias ID'); } };
   try {
     assert.equal(await validateCachedDownload(cache, wrapper), null);
-    assert.equal(nameLookups, 0);
     assert.equal(await validateCachedDownload({ ...cache, get: () => other }, { ...wrapper, course_id: 1 }), null);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

@@ -43,22 +43,19 @@ test('getDownloadStatus summarizes downloads with cached course names', () => {
 
   assert.equal(result.total_file_count, 3);
   assert.equal(result.total_size_bytes, 450);
-  assert.deepEqual(result.courses, [
-    {
-      course_id: 10,
-      course_name: '운영체제',
-      file_count: 2,
-      total_size_bytes: 400,
-      last_downloaded_at: '2026-04-16T10:00:00.000Z',
-    },
-    {
-      course_id: 20,
-      course_name: 'course_id: 20',
-      file_count: 1,
-      total_size_bytes: 50,
-      last_downloaded_at: '2026-04-15T10:00:00.000Z',
-    },
-  ]);
+  assert.equal(result.courses.length, 2);
+  const courses = new Map(result.courses.map((course) => [course.course_id, course]));
+  const knownCourse = courses.get(10)!;
+  assert.equal(knownCourse.course_name, '운영체제');
+  assert.equal(knownCourse.file_count, 2);
+  assert.equal(knownCourse.total_size_bytes, 400);
+  assert.equal(knownCourse.last_downloaded_at, '2026-04-16T10:00:00.000Z');
+
+  const unnamedCourse = courses.get(20)!;
+  assert.ok(unnamedCourse.course_name.trim(), 'uncached courses have a display label');
+  assert.equal(unnamedCourse.file_count, 1);
+  assert.equal(unnamedCourse.total_size_bytes, 50);
+  assert.equal(unnamedCourse.last_downloaded_at, '2026-04-15T10:00:00.000Z');
 });
 
 test('getDownloadStatus returns detail mode for a single course', () => {

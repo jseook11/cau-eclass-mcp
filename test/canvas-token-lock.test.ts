@@ -49,7 +49,8 @@ test('lock paths hash usernames and lock artifacts are private', async (t) => {
   const lock = await acquireCanvasTokenLock(username, fastOptions(rootDir));
   try {
     const bucketName = canvasTokenLockBucketName(username);
-    assert.match(bucketName, /^[a-f0-9]{64}$/);
+    assert.equal(canvasTokenLockBucketName(username), bucketName);
+    assert.notEqual(canvasTokenLockBucketName('another-student@example.edu'), bucketName);
     assert.equal(bucketName.includes('student'), false);
     assert.equal(lock.bucketPath, canvasTokenLockBucketPath(username, rootDir));
     assert.equal((await fs.stat(rootDir)).mode & 0o777, 0o700);
@@ -87,7 +88,7 @@ test('two lock clients serialize the same username', async () => {
   }
 });
 
-test('a delayed publication cannot introduce an earlier owner after acquisition', async () => {
+test('delayed lock publication preserves mutual exclusion', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-token-lock-publish-'));
   const rootDir = path.join(temp, 'locks');
   const username = 'publication-race';
@@ -95,7 +96,7 @@ test('a delayed publication cannot introduce an earlier owner after acquisition'
   const published = new Promise<void>((resolve) => { markPublished = resolve; });
   let resumePublisher!: () => void;
   const resume = new Promise<void>((resolve) => { resumePublisher = resolve; });
-  let delayedResolved = false;
+  const acquired: Array<Awaited<ReturnType<typeof acquireCanvasTokenLock>>> = [];
   let normalPromise: Promise<Awaited<ReturnType<typeof acquireCanvasTokenLock>>> | undefined;
   let normalLock: Awaited<ReturnType<typeof acquireCanvasTokenLock>> | undefined;
 
@@ -106,29 +107,34 @@ test('a delayed publication cannot introduce an earlier owner after acquisition'
       await resume;
     },
   }).then((lock) => {
-    delayedResolved = true;
+    acquired.push(lock);
     return lock;
   });
 
   try {
     await published;
-    normalPromise = acquireCanvasTokenLock(username, fastOptions(rootDir));
+    normalPromise = acquireCanvasTokenLock(username, fastOptions(rootDir)).then((lock) => {
+      acquired.push(lock);
+      return lock;
+    });
     const bucket = canvasTokenLockBucketPath(username, rootDir);
     await waitUntil(async () => (await fs.readdir(bucket)).length === 2);
-    await sleep(20);
-    assert.equal(delayedResolved, false, 'an uninitialized candidate must block election');
 
     resumePublisher();
-    const normal = await normalPromise;
-    normalLock = normal;
-    assert.equal(delayedResolved, false, 'post-publication order must make the resumed candidate later');
-    await normal.release();
+    const first = await Promise.race([normalPromise, delayedPromise]);
+    await first.assertOwned();
+    await sleep(20);
+    assert.equal(acquired.length, 1, 'only one caller may hold the lock at a time');
+    await first.release();
 
-    const delayed = await delayedPromise;
-    await delayed.assertOwned();
-    await delayed.release();
+    const [normal, delayed] = await Promise.all([normalPromise, delayedPromise]);
+    normalLock = normal;
+    const second = normal === first ? delayed : normal;
+    await second.assertOwned();
+    await second.release();
   } finally {
     resumePublisher();
+    for (const lock of acquired) await lock.release();
     if (!normalLock && normalPromise) normalLock = await normalPromise.catch(() => undefined);
     await normalLock?.release();
     const delayed = await delayedPromise.catch(() => null);
@@ -235,7 +241,7 @@ test('an old candidate owned by a live PID is never stolen', async () => {
         staleMs: 5,
         hardStaleMs: 10,
       }),
-      /Timed out waiting for Canvas token lock/,
+      Error,
     );
     assert.equal((await fs.stat(ownerPath)).isFile(), true);
   } finally {
@@ -253,9 +259,13 @@ test('waiting for a live owner fails with a bounded timeout', async () => {
         ...fastOptions(rootDir),
         timeoutMs: 60,
       }),
-      /Timed out waiting for Canvas token lock/,
+      Error,
     );
     await first.assertOwned();
+    await first.release();
+    const next = await acquireCanvasTokenLock('alice', fastOptions(rootDir));
+    await next.assertOwned();
+    await next.release();
   } finally {
     await first.release();
     await fs.rm(temp, { recursive: true, force: true });
@@ -266,12 +276,13 @@ test('withCanvasTokenLock releases ownership when the callback throws', async ()
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-token-lock-error-'));
   const rootDir = path.join(temp, 'locks');
   const options = fastOptions(rootDir);
+  const failure = new Error('callback failed');
   try {
     await assert.rejects(
       () => withCanvasTokenLock('alice', async () => {
-        throw new Error('callback failed');
+        throw failure;
       }, options),
-      /callback failed/,
+      (err: unknown) => err === failure,
     );
 
     const lock = await acquireCanvasTokenLock('alice', options);

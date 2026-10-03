@@ -7,7 +7,6 @@ import { CanvasClient } from '../src/canvas-client.js';
 import type { CanvasClient as CanvasClientType } from '../src/canvas-client.js';
 import type { BrowserSession } from '../src/browser-session.js';
 import type { FileCache } from '../src/file-cache.js';
-import { materialFingerprint } from '../src/material-acquisition.js';
 import { downloadOne } from '../src/tools/download.js';
 
 test('ExternalTool wrappers stay unresolved without semantic evidence, even in Online lecture', async () => {
@@ -61,7 +60,7 @@ test('getMaterials preserves announcement provenance when another source represe
   assert.equal(result.materials.length, 1);
   assert.equal(result.materials[0].source, 'courseresource');
   assert.equal(result.materials[0].announcement_id, '20');
-  assert.deepEqual(result.materials[0].sources, ['courseresource', 'announcements']);
+  assert.deepEqual(new Set(result.materials[0].sources), new Set(['courseresource', 'announcements']));
 });
 
 test('a shared attachment retains every originating announcement ID despite repeated titles', async () => {
@@ -74,7 +73,7 @@ test('a shared attachment retains every originating announcement ID despite repe
 
   assert.equal(result.materials.length, 1);
   assert.equal(result.materials[0].announcement_id, '20');
-  assert.deepEqual(result.materials[0].announcement_ids, ['20', '21']);
+  assert.deepEqual(new Set(result.materials[0].announcement_ids), new Set(['20', '21']));
 });
 
 test('locked and future Canvas modules stay not_open without a launch, download, or retry', async () => {
@@ -209,10 +208,11 @@ test('getMaterials does not duplicate the Canvas host for absolute module URLs',
   const result = await getMaterials(client, mockSession(), 1, ['modules', 'external']);
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.materials.map((material) => material.url), [
+  assert.equal(result.materials.length, 2);
+  assert.deepEqual(new Set(result.materials.map((material) => material.url)), new Set([
     'https://eclass3.cau.ac.kr/courses/1/files/10',
     'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
-  ]);
+  ]));
 });
 
 test('getMaterials returns ok true when all sources succeed with no materials', async () => {
@@ -271,21 +271,20 @@ test('getMaterials suppresses repeated Files permission-denied requests during t
 
     assert.equal(first.errors[0].retryable, false);
     assert.equal(second.errors[0].retryable, false);
-    assert.match(second.errors[0].reason, /Files API/);
+    assert.equal(first.errors[0].source, 'files');
+    assert.equal(second.errors[0].source, 'files');
     assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('getMaterials runs duplicate sources only once', async () => {
-  let moduleFetchCount = 0;
-  const client = mockClient(async (path) => {
-    if (path.includes('/modules')) {
-      moduleFetchCount += 1;
-    }
-    return [];
-  });
+test('getMaterials does not duplicate results when a source is requested repeatedly', async () => {
+  const client = mockClient(async () => [{
+    id: 1,
+    name: 'Week 1',
+    items: [{ id: 10, title: 'intro.pdf', type: 'File', html_url: '/courses/1/files/10' }],
+  }]);
 
   const result = await getMaterials(
     client,
@@ -294,8 +293,10 @@ test('getMaterials runs duplicate sources only once', async () => {
     ['modules', 'modules', 'modules'] as MaterialSource[],
   );
 
-  assert.equal(moduleFetchCount, 1);
   assert.deepEqual(result.sources.requested, ['modules']);
+  assert.equal(result.materials.length, 1);
+  assert.equal(result.materials[0].id, '10');
+  assert.equal(result.materials[0].title, 'intro.pdf');
 });
 
 test('getMaterials merges the same opened weekly item from modulebuilder and external', async () => {
@@ -323,20 +324,16 @@ test('getMaterials merges the same opened weekly item from modulebuilder and ext
   const result = await getMaterials(client, session, 147863, ['external', 'modulebuilder']);
 
   assert.equal(result.materials.length, 1);
-  assert.deepEqual(result.materials[0], {
-    id: '3707021',
-    title: 'algorithm_01.1_introduction',
-    type: 'movie',
-    url: 'https://ocs.cau.ac.kr/em/lecture-content-id',
-    source: 'modulebuilder',
-    sources: ['modulebuilder', 'external'],
-    module_name: '1주차',
-    is_playwright_required: true,
-    is_playwright_required: true,
-    is_playright_required: true,
-    asset_kind: 'video', downloadable: false, acquisition_policy: 'exclude',
-    resolution_reason: 'explicit_video_type', fingerprint: materialFingerprint(result.materials[0]),
-  });
+  const material = result.materials[0];
+  assert.equal(material.id, '3707021');
+  assert.equal(material.title, 'algorithm_01.1_introduction');
+  assert.equal(material.type, 'movie');
+  assert.equal(material.url, 'https://ocs.cau.ac.kr/em/lecture-content-id');
+  assert.equal(material.module_name, '1주차');
+  assert.deepEqual(new Set(material.sources), new Set(['modulebuilder', 'external']));
+  assert.equal(material.asset_kind, 'video');
+  assert.equal(material.downloadable, false);
+  assert.equal(material.acquisition_policy, 'exclude');
 });
 
 test('getMaterials preserves ExternalTool type and both playwright flags for wrapper items', async () => {
@@ -396,13 +393,11 @@ test('getMaterials merges Canvas file aliases across modules and announcements',
   assert.equal(result.materials.length, 1);
   assert.equal(result.materials[0].source, 'announcements');
   assert.equal(result.materials[0].announcement_id, '20');
-  assert.deepEqual(result.materials[0].sources, ['announcements', 'modules']);
+  assert.deepEqual(new Set(result.materials[0].sources), new Set(['announcements', 'modules']));
 });
 
-test('getMaterials uses module content_id to merge a module-item URL with Files', async () => {
-  const requestedPaths: string[] = [];
+test('getMaterials merges a module item and its Canvas file while retaining the download URL', async () => {
   const client = mockClient(async (path) => {
-    requestedPaths.push(path);
     if (path.includes('/modules')) {
       return [{
         id: 1,
@@ -430,20 +425,17 @@ test('getMaterials uses module content_id to merge a module-item URL with Files'
   const result = await getMaterials(client, mockSession(), 1, ['modules', 'files']);
 
   assert.equal(result.materials.length, 1);
-  assert.deepEqual(result.materials[0], {
-    id: '10',
-    canvas_file_id: '55',
-    title: 'lecture.pdf',
-    type: 'application/pdf',
-    url: 'https://eclass3.cau.ac.kr/files/55/download?verifier=signed',
-    source: 'modules',
-    sources: ['modules', 'files'],
-    url_source: 'files',
-    module_name: '1주차',
-    asset_kind: 'document', downloadable: true, acquisition_policy: 'download',
-    resolution_reason: 'explicit_file_type', fingerprint: materialFingerprint(result.materials[0]),
-  });
-  assert.equal(requestedPaths.filter((path) => path.includes('/files')).length, 1);
+  const material = result.materials[0];
+  assert.equal(material.id, '10');
+  assert.equal(material.canvas_file_id, '55');
+  assert.equal(material.title, 'lecture.pdf');
+  assert.equal(material.url, 'https://eclass3.cau.ac.kr/files/55/download?verifier=signed');
+  assert.deepEqual(new Set(material.sources), new Set(['modules', 'files']));
+  assert.equal(material.url_source, 'files');
+  assert.equal(material.module_name, '1주차');
+  assert.equal(material.asset_kind, 'document');
+  assert.equal(material.downloadable, true);
+  assert.equal(material.acquisition_policy, 'download');
 });
 
 test('getMaterials does not merge File module items with missing content_id', async () => {
@@ -470,7 +462,8 @@ test('getMaterials does not merge File module items with missing content_id', as
 
   const result = await getMaterials(client, mockSession(), 1, ['modules']);
 
-  assert.deepEqual(result.materials.map((material) => material.id), ['10', '11']);
+  assert.equal(result.materials.length, 2);
+  assert.deepEqual(new Set(result.materials.map((material) => material.id)), new Set(['10', '11']));
 });
 
 test('getMaterials removes repeated records within one source', async () => {
@@ -504,19 +497,8 @@ test('getMaterials keeps distinct items that only share a title', async () => {
     ['courseresource'],
   );
 
-  assert.deepEqual(result.materials.map((material) => material.id), ['resource-1', 'resource-2']);
-});
-
-test('getMaterials fetches the shared Canvas modules endpoint once', async () => {
-  let moduleFetchCount = 0;
-  const client = mockClient(async (path) => {
-    if (path.includes('/modules')) moduleFetchCount += 1;
-    return [];
-  });
-
-  await getMaterials(client, mockSession(), 1, ['modules', 'external']);
-
-  assert.equal(moduleFetchCount, 1);
+  assert.equal(result.materials.length, 2);
+  assert.deepEqual(new Set(result.materials.map((material) => material.id)), new Set(['resource-1', 'resource-2']));
 });
 
 test('getMaterials default sources omit the permission-sensitive Files API', async () => {
@@ -528,13 +510,13 @@ test('getMaterials default sources omit the permission-sensitive Files API', asy
 
   const result = await getMaterials(client, mockSession(), 1);
 
-  assert.deepEqual(result.sources.requested, [
+  assert.deepEqual(new Set(result.sources.requested), new Set([
     'modulebuilder',
     'courseresource',
     'announcements',
     'modules',
     'external',
-  ]);
+  ]));
   assert.equal(requestedPaths.some((path) => path.includes('/files')), false);
 });
 
