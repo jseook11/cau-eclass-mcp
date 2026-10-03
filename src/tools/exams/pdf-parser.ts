@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ExamScheduleRecord } from '../../exam-cache.js';
+import { normalizeExamTerm, parseExamTerm } from '../../academic-term.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,7 +13,7 @@ interface TsvWord {
   text: string;
 }
 
-type PdfLayout = 'general_education' | 'software_college';
+type PdfLayout = 'general_education' | 'software_college' | 'business_economics';
 
 export type ParseExamPdfResult = {
   ok: true;
@@ -62,18 +63,20 @@ export function parsePdftotextTsv(tsv: string): TsvWord[] {
 }
 
 function detectLayout(words: TsvWord[]): PdfLayout | null {
-  const joined = words.slice(0, 200).map((w) => w.text).join(' ');
+  const joined = [...words].sort((a, b) => a.page_num - b.page_num || a.top - b.top || a.left - b.left)
+    .slice(0, 200).map((w) => w.text).join(' ');
+  if (joined.includes('교과목코드') && joined.includes('개설대학명')) return 'business_economics';
   if (joined.includes('소프트웨어') || (joined.includes('교과목') && joined.includes('코드'))) {
     return 'software_college';
   }
-  if (joined.includes('교양대학') || joined.includes('기말시험 유형') || joined.includes('교과목명')) {
+  if (joined.includes('교양대학') || /(?:중간|기말)시험 유형/.test(joined) || joined.includes('교과목명')) {
     return 'general_education';
   }
   return null;
 }
 
 function normalizeCell(words: TsvWord[]): string | null {
-  const sorted = [...words].sort((a, b) => a.left - b.left);
+  const sorted = groupVisualLines(words).flat();
   if (sorted.length === 0) return null;
   let output = '';
   let prev: TsvWord | null = null;
@@ -82,7 +85,7 @@ function normalizeCell(words: TsvWord[]): string | null {
       output = word.text;
     } else {
       const gap = word.left - (prev.left + prev.width);
-      const needsSpace = gap > 3 || /[A-Za-z0-9)]$/.test(prev.text) || /^[A-Za-z0-9(]/.test(word.text);
+      const needsSpace = Math.abs(word.top - prev.top) > 2.2 || gap > 3 || /[A-Za-z0-9)]$/.test(prev.text) || /^[A-Za-z0-9(]/.test(word.text);
       output += needsSpace ? ` ${word.text}` : word.text;
     }
     prev = word;
@@ -116,11 +119,38 @@ function groupVisualLines(words: TsvWord[]): TsvWord[][] {
   return lines.map((line) => line.sort((a, b) => a.left - b.left));
 }
 
-function toIsoDate(value: string | null): string | null {
+function groupAnchoredRows(words: TsvWord[], isAnchor: (word: TsvWord) => boolean): TsvWord[][] {
+  const byPage = new Map<number, TsvWord[]>();
+  for (const word of words) {
+    const page = byPage.get(word.page_num) ?? [];
+    page.push(word);
+    byPage.set(word.page_num, page);
+  }
+  const rows: TsvWord[][] = [];
+  for (const page of byPage.values()) {
+    const anchors = page.filter(isAnchor)
+      .sort((a, b) => a.top - b.top);
+    // 고정된 열을 행의 중심으로 삼아 줄바꿈과 글꼴별 높이 차이를 함께 처리한다.
+    for (let i = 0; i < anchors.length; i++) {
+      const anchor = anchors[i];
+      const previous = anchors[i - 1]?.top ?? anchor.top - (anchors[i + 1]?.top - anchor.top || 20);
+      const next = anchors[i + 1]?.top ?? anchor.top + (anchor.top - previous);
+      rows.push(page.filter((word) => word.top >= (previous + anchor.top) / 2 && word.top < (anchor.top + next) / 2));
+    }
+  }
+  return rows;
+}
+
+function toIsoDate(value: string | null, term?: string): string | null {
   if (!value) return null;
   const match = /(\d{4})[-.](\d{1,2})[-.](\d{1,2})/.exec(value);
-  if (!match) return null;
-  return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  if (match) return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  const shortDate = /^(\d{1,2})\/(\d{1,2})(?:\([월화수목금토일]\))?$/.exec(value.replace(/\s+/g, ''));
+  const academicTerm = term ? parseExamTerm(term) : null;
+  if (!shortDate || !academicTerm) return null;
+  const month = Number(shortDate[1]);
+  const year = academicTerm.year + (academicTerm.semester === 'W' && month <= 2 ? 1 : 0);
+  return `${year}-${shortDate[1].padStart(2, '0')}-${shortDate[2].padStart(2, '0')}`;
 }
 
 function toTime(value: string | null): string | null {
@@ -138,23 +168,32 @@ function parseSoftwareLine(
   line: TsvWord[],
   term: string,
   examType: string,
+  compact: boolean,
+  landscape: boolean,
 ): Omit<ExamScheduleRecord, 'id' | 'source_document_id'> | null {
-  const courseCode = normalizeCell(wordsInRange(line, 20, 52));
-  const section = normalizeCell(wordsInRange(line, 52, 78));
-  const courseName = normalizeCell(wordsInRange(line, 78, 145));
+  // 중간시험의 축소 인쇄본과 기존 기말시험 PDF는 열 경계가 다르다.
+  const columns = landscape
+    ? [18, 42, 70, 184, 262, 300, 331, 399, 451, 501, 551, 604, 756, 835]
+    : compact
+    ? [53, 77, 92, 162, 202, 230, 251, 289, 325, 357, 389, 419, 518, 560]
+    : [20, 52, 78, 145, 185, 220, 240, 286, 322, 356, 390, 420, 540, 595];
+  const cell = (index: number): string | null => normalizeCell(wordsInRange(line, columns[index], columns[index + 1]));
+  const courseCode = cell(0);
+  const section = cell(1);
+  const courseName = cell(2);
   if (!courseCode || !/^\d{4,6}$/.test(courseCode) || !section || !courseName) return null;
 
-  const lectureTime = normalizeCell(wordsInRange(line, 145, 185));
-  const instructor = normalizeCell(wordsInRange(line, 185, 220));
-  const examMethod = normalizeCell(wordsInRange(line, 240, 286));
+  const lectureTime = cell(3);
+  const instructor = cell(4);
+  const examMethod = cell(6);
   if (!isExamMethod(examMethod)) return null;
 
-  const examDate = toIsoDate(normalizeCell(wordsInRange(line, 286, 322)));
-  const startTime = toTime(normalizeCell(wordsInRange(line, 322, 356)));
-  const endTime = toTime(normalizeCell(wordsInRange(line, 356, 390)));
-  const building = normalizeCell(wordsInRange(line, 390, 420));
-  const rooms = normalizeCell(wordsInRange(line, 420, 540));
-  const note = normalizeCell(wordsInRange(line, 540, 595));
+  const examDate = toIsoDate(cell(7), term);
+  const startTime = toTime(cell(8));
+  const endTime = toTime(cell(9));
+  const building = cell(10);
+  const rooms = cell(11);
+  const note = cell(12);
 
   return {
     term,
@@ -175,23 +214,67 @@ function parseSoftwareLine(
   };
 }
 
-function parseGeneralEducationLine(
+function parseGeneralEducationCombinedLine(
   line: TsvWord[],
   term: string,
   examType: string,
 ): Omit<ExamScheduleRecord, 'id' | 'source_document_id'> | null {
-  const courseName = normalizeCell(wordsInRange(line, 0, 160));
-  const section = normalizeCell(wordsInRange(line, 160, 190));
-  const lectureTime = normalizeCell(wordsInRange(line, 190, 275));
-  const instructor = normalizeCell(wordsInRange(line, 275, 365));
-  const examMethod = normalizeCell(wordsInRange(line, 365, 475));
+  const courseName = normalizeCell(wordsInRange(line, 56, 282));
+  const section = normalizeCell(wordsInRange(line, 282, 315));
+  const instructor = normalizeCell(wordsInRange(line, 315, 381));
+  const lectureTime = normalizeCell(wordsInRange(line, 381, 461));
+  const examMethod = normalizeCell(wordsInRange(line, 461, 573));
   if (!courseName || !section || !/^[A-Z0-9]{2,3}$/i.test(section) || !isExamMethod(examMethod)) return null;
 
-  const examDate = toIsoDate(normalizeCell(wordsInRange(line, 475, 560)));
-  const startTime = toTime(normalizeCell(wordsInRange(line, 560, 635)));
-  const endTime = toTime(normalizeCell(wordsInRange(line, 635, 705)));
-  const building = normalizeCell(wordsInRange(line, 705, 760));
-  const rooms = normalizeCell(wordsInRange(line, 760, 842));
+  const dateText = normalizeCell(wordsInRange(line, 573, 645));
+  const examDate = toIsoDate(dateText, term);
+  const timeText = normalizeCell(wordsInRange(line, 645, 744));
+  const times = timeText?.match(/^(\d{1,2}:\d{2})\s*[~～-]\s*(\d{1,2}:\d{2})$/);
+  const roomText = normalizeCell(wordsInRange(line, 744, 842));
+  const room = roomText && /^(\d{3})\s*-\s*(.+)$/.exec(roomText);
+  const notes = [
+    dateText && !examDate ? `시험 날짜: ${dateText}` : null,
+    timeText && !times ? `시험 시간: ${timeText}` : null,
+    roomText && !room ? `시험 강의실: ${roomText}` : null,
+  ].filter(Boolean);
+
+  return {
+    term, exam_type: examType, course_code: null, course_name: courseName, section,
+    lecture_time: lectureTime, instructor, exam_method: examMethod,
+    exam_date: examDate, start_time: times ? toTime(times[1]) : null, end_time: times ? toTime(times[2]) : null,
+    building: room ? room[1] : null, rooms: room ? room[2] : roomText,
+    note: notes.join('; ') || null, raw_text: normalizeCell(line),
+  };
+}
+
+function parseGeneralEducationLine(
+  line: TsvWord[],
+  term: string,
+  examType: string,
+  variant: 'legacy' | 'campus_midterm' | 'campus_final' = 'legacy',
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'> | null {
+  const columns = variant === 'campus_midterm'
+    ? [53, 220, 256, 308, 386, 484, 558, 633, 684, 731, 778, 842]
+    : variant === 'campus_final'
+      ? [45, 164, 200, 276, 334, 446, 499, 586, 655, 724, 770, 842]
+      : [0, 160, 190, 275, 365, 475, 560, 635, 705, 760, 842];
+  const cell = (index: number): string | null => normalizeCell(wordsInRange(line, columns[index], columns[index + 1]));
+  const courseName = cell(0);
+  const section = cell(1);
+  const lectureTime = cell(variant === 'campus_midterm' ? 3 : 2);
+  const instructor = cell(variant === 'campus_midterm' ? 2 : 3);
+  const examMethod = cell(4);
+  if (!courseName || !section || !/^[A-Z0-9]{2,3}$/i.test(section) || !isExamMethod(examMethod)) return null;
+
+  const dateIndex = variant === 'legacy' ? 5 : 6;
+  const dateText = cell(dateIndex);
+  const examDate = toIsoDate(dateText, term);
+  const notes = [variant === 'legacy' ? null : cell(5)];
+  if ((dateText?.match(/\d{4}[-.]\d{1,2}[-.]\d{1,2}/g)?.length ?? 0) > 1) notes.push(`시험 일자: ${dateText}`);
+  const startTime = toTime(cell(dateIndex + 1));
+  const endTime = toTime(cell(dateIndex + 2));
+  const building = cell(dateIndex + 3);
+  const rooms = cell(dateIndex + 4);
 
   return {
     term,
@@ -207,8 +290,46 @@ function parseGeneralEducationLine(
     end_time: endTime,
     building,
     rooms,
-    note: null,
+    note: notes.filter(Boolean).join('; ') || null,
     raw_text: normalizeCell(line),
+  };
+}
+
+function parseBusinessEconomicsLine(
+  line: TsvWord[],
+  term: string,
+  examType: string,
+  hasCredits: boolean,
+  compactCredits: boolean,
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'> | null {
+  const rowYear = normalizeCell(wordsInRange(line, 50, 73));
+  const rowSemester = normalizeCell(wordsInRange(line, 73, 90));
+  if (!rowYear || !rowSemester || parseExamTerm(`${rowYear}-${rowSemester}`)?.canonical !== term) return null;
+
+  // 학점 열 유무와 인쇄 배율에 따라 공식 출력본의 열 경계가 다르다.
+  const columns = compactCredits
+    ? [88, 124, 142, 226, 500, 636, 662, 778, 833, 860, 893, 932, 962, 991, 1020, 1111, 1140]
+    : hasCredits
+    ? [90, 128, 147, 238, 531, 676, 704, 770, 824, 850, 879, 920, 951, 982, 1014, 1111, 1140]
+    : [94, 134, 153, 213, 509, 664, 691, 811, 887, 919, 954, 991, 1024, 1057, 1090, 1125, 1140];
+  const cell = (index: number): string | null => normalizeCell(wordsInRange(line, columns[index], columns[index + 1]));
+  const courseCode = cell(0);
+  const section = cell(1);
+  const courseName = cell(2);
+  const examMethod = cell(7);
+  if (!courseCode || !/^\d{4,6}$/.test(courseCode) || !section || !courseName || !isExamMethod(examMethod)) return null;
+  const examDate = toIsoDate(cell(10), term);
+  const notes = [cell(9), cell(15)].filter(Boolean);
+  const academicTerm = parseExamTerm(term)!;
+  if (examDate) {
+    const expectedYear = academicTerm.year + (academicTerm.semester === 'W' && Number(examDate.slice(5, 7)) <= 2 ? 1 : 0);
+    if (Number(examDate.slice(0, 4)) !== expectedYear) notes.push(`원문 시험 날짜 확인 필요: ${examDate} (${term})`);
+  }
+  return {
+    term, exam_type: examType, course_code: courseCode, course_name: courseName, section,
+    lecture_time: cell(4), instructor: cell(5), exam_method: examMethod,
+    exam_date: examDate, start_time: toTime(cell(11)), end_time: toTime(cell(12)),
+    building: cell(13), rooms: cell(14), note: notes.join('; ') || null, raw_text: normalizeCell(line),
   };
 }
 
@@ -216,6 +337,7 @@ export function parseExamScheduleTsv(
   tsv: string,
   input: { term: string; exam_type: string },
 ): ParseExamPdfResult {
+  input = { ...input, term: normalizeExamTerm(input.term) };
   const words = parsePdftotextTsv(tsv);
   if (words.length === 0) {
     return {
@@ -237,11 +359,36 @@ export function parseExamScheduleTsv(
     };
   }
 
-  const schedules = groupVisualLines(words)
-    .map((line) => layout === 'software_college'
-      ? parseSoftwareLine(line, input.term, input.exam_type)
-      : parseGeneralEducationLine(line, input.term, input.exam_type))
-    .filter((row): row is Omit<ExamScheduleRecord, 'id' | 'source_document_id'> => row !== null);
+  const compactSoftware = words.some((word) => word.text === '코드' && word.left >= 50);
+  const landscapeSoftware = words.some((word) => word.text === '시험시작시간' && word.left >= 450);
+  const combinedGeneralEducation = words.some((word) => word.text === '캠퍼스');
+  const separateCampusTimes = combinedGeneralEducation && words.some((word) => word.text === '시작시간');
+  const campusVariant = (words.find((word) => /^분반2?$/.test(word.text))?.left ?? 0) > 220
+    ? 'campus_midterm' as const : 'campus_final' as const;
+  const businessHasCredits = words.some((word) => word.text === '학점');
+  const compactBusinessCredits = businessHasCredits && (words.find((word) => word.text === '교과목명')?.left ?? Infinity) < 180;
+  const schedules: Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] = [];
+  const codeMin = landscapeSoftware ? 18 : compactSoftware ? 53 : 20;
+  const codeMax = landscapeSoftware ? 42 : compactSoftware ? 77 : 52;
+  const lines = layout === 'software_college'
+    ? groupAnchoredRows(words, (word) => word.left >= codeMin && word.left < codeMax && /^\d{4,6}$/.test(word.text))
+    : layout === 'general_education' && combinedGeneralEducation
+      ? groupAnchoredRows(words, (word) => word.left < 50 && /^(서울|다빈치|안성)$/.test(word.text))
+      : groupVisualLines(words);
+  for (const line of lines) {
+    const row = layout === 'business_economics'
+      ? parseBusinessEconomicsLine(line, input.term, input.exam_type, businessHasCredits, compactBusinessCredits)
+      : layout === 'software_college'
+      ? parseSoftwareLine(line, input.term, input.exam_type, compactSoftware, landscapeSoftware)
+      : separateCampusTimes
+        ? parseGeneralEducationLine(line, input.term, input.exam_type, campusVariant)
+        : combinedGeneralEducation
+        ? parseGeneralEducationCombinedLine(line, input.term, input.exam_type)
+        : parseGeneralEducationLine(line, input.term, input.exam_type);
+    if (row) {
+      schedules.push(row);
+    }
+  }
 
   if (schedules.length === 0) {
     return {

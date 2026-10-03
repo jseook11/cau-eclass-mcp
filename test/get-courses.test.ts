@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { createEclassServer } from '../src/server.js';
 import { checkEclassCoursesApi } from '../src/doctor.js';
-import { getCourses } from '../src/tools/get-courses.js';
+import { getCourses, parseAcademicTerm } from '../src/tools/get-courses.js';
 import type { BrowserSession } from '../src/browser-session.js';
 import { CanvasClient } from '../src/canvas-client.js';
 import type { ExamCache } from '../src/exam-cache.js';
@@ -167,6 +167,32 @@ test('getCourses resolves date-less term names and includes every matching Canva
 
   const courses = await getCourses(client, { scope: 'current', now: NOW });
   assert.deepEqual(courses.map((course) => course.id), [2, 3]);
+});
+
+test('academic terms rank summer and winter between the correct regular semesters', () => {
+  const names = ['2026년 1학기', '2026학년도 하계 계절학기', '2026년 2학기', '2026-겨울 계절학기', '2027년 1학기'];
+  const parsed = names.map((name) => parseAcademicTerm(name)!);
+  assert.deepEqual(parsed.map((term) => term.canonical), ['2026-1', '2026-S', '2026-2', '2026-W', '2027-1']);
+  assert.ok(parsed.every((term, i) => i === 0 || term.rank > parsed[i - 1].rank));
+  assert.equal(parseAcademicTerm('2026_S_35703_01')?.canonical, '2026-S');
+  assert.equal(parseAcademicTerm('2026-10-03'), null);
+});
+
+test('getCourses recognizes seasonal cohorts with term dates or only seasonal names', async () => {
+  const summer = fakeCanvas([
+    { id: 1, name: '정규 1학기 과목', term: { name: '2026년 1학기' } },
+    { id: 2, name: '하계 과목', term: { name: '2026년 하계 계절학기', start_at: '2026-06-24', end_at: '2026-07-15' } },
+    { id: 3, name: '같은 여름학기 과목', term: { name: '2026-S' } },
+    { id: 4, name: '너무 이른 2학기 과목', term: { name: '2026년 2학기' } },
+  ]);
+  assert.deepEqual((await getCourses(summer.client, { now: new Date('2026-07-01T12:00:00+09:00') })).map((course) => course.id), [2, 3]);
+  const winter = fakeCanvas([
+    { id: 1, name: '정규 2학기 과목', term: { name: '2025년 2학기' } },
+    { id: 2, name: '동계 과목', term: { name: '2025학년도 동계 계절학기' } },
+    { id: 3, name: '같은 겨울학기 과목', course_code: '2025-W-27803-01' },
+    { id: 4, name: '다음 1학기 과목', term: { name: '2026년 1학기' } },
+  ]);
+  assert.deepEqual((await getCourses(winter.client, { now: new Date('2026-01-05T12:00:00+09:00') })).map((course) => course.id), [2, 3]);
 });
 
 test('getCourses retains a selected date-only cohort without term IDs', async () => {

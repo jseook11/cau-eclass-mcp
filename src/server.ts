@@ -30,6 +30,7 @@ import { syncCourseMetadata } from './tools/exams/course-metadata.js';
 import { syncExamSchedules } from './tools/exams/sync-exam-schedules.js';
 import { getExamSchedule } from './tools/exams/get-exam-schedule.js';
 import { listExamSources } from './tools/exams/list-exam-sources.js';
+import { normalizeExamTerm, parseExamTerm } from './academic-term.js';
 import { searchSyllabusList, getSyllabus } from './mportal-client.js';
 import { runDoctor } from './doctor.js';
 import { sanitizeDebug } from './errors.js';
@@ -188,9 +189,13 @@ const SyncCourseMetadataSchema = z.object({
   force: z.boolean().optional().default(false),
 });
 
+const ExamTermSchema = z.string().min(1).max(64)
+  .refine((value) => parseExamTerm(value) !== null, '학기는 YYYY-1, YYYY-2, YYYY-S(하계), YYYY-W(동계) 또는 연도가 포함된 한글 학기명이어야 합니다.')
+  .transform(normalizeExamTerm);
+
 const SyncExamSchedulesSchema = z.object({
-  term: z.string().min(1).max(32),
-  exam_type: z.enum(['final']).optional().default('final'),
+  term: ExamTermSchema,
+  exam_type: z.enum(['midterm', 'final']).optional().default('final'),
   course_id: z.number().int().positive().optional(),
   force: z.boolean().optional().default(false),
   source_url: z.string().url().optional(),
@@ -199,8 +204,8 @@ const SyncExamSchedulesSchema = z.object({
 const GetExamScheduleSchema = z.object({
   course_id: z.number().int().positive().optional(),
   query: z.string().min(1).max(256).optional(),
-  term: z.string().min(1).max(32).optional(),
-  exam_type: z.enum(['final']).optional().default('final'),
+  term: ExamTermSchema.optional(),
+  exam_type: z.enum(['midterm', 'final']).optional().default('final'),
   refresh: z.boolean().optional().default(false),
 });
 
@@ -308,12 +313,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_sync_exam_schedules',
-        description: '[네트워크] 기말고사 공지 소스를 확인하고 PDF 시간표를 다운로드/정규화해 별도 시험 DB에 저장합니다. pdftotext가 없으면 문서만 저장하고 파싱 실패를 partial_failures에 남깁니다.',
+        description: '[네트워크] 지정한 학기의 중간/기말시험 공지를 탐색하고 PDF 시간표를 다운로드/정규화해 별도 시험 DB에 저장합니다. pdftotext가 없으면 문서만 저장하고 파싱 실패를 partial_failures에 남깁니다.',
         inputSchema: {
           type: 'object',
           properties: {
-            term: { type: 'string', description: '학기 식별자 (예: 2026-1)' },
-            exam_type: { type: 'string', enum: ['final'], description: '시험 종류 (v1은 final만 지원)', default: 'final' },
+            term: { type: 'string', description: '학기 식별자: YYYY-1(1학기), YYYY-2(2학기), YYYY-S(하계), YYYY-W(동계). 연도가 포함된 한글 학기명도 지원' },
+            exam_type: { type: 'string', enum: ['midterm', 'final'], description: '시험 종류: midterm(중간), final(기말). 기본값: final', default: 'final' },
             course_id: { type: 'number', description: '특정 강의에 관련된 소스 우선 동기화' },
             force: { type: 'boolean', description: '문서 해시가 같아도 재파싱 (기본값: false)', default: false },
             source_url: { type: 'string', description: '특정 공지 URL만 동기화' },
@@ -323,14 +328,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_get_exam_schedule',
-        description: '[로컬] 저장된 시험 시간표를 조회합니다. course_id 지정 시 SIS 확정 course_code+분반 exact match를 우선하며, 교양대학 과목(course_code가 PDF에 없음)은 강의명+분반 정규화 매칭으로 fallback합니다(matched_by로 구분). 모두 실패하면 reason=EXACT_MATCH_NOT_FOUND와 함께 해당 term/exam_type의 전체 후보 목록(candidates)을 반환하므로 호출자가 직접 판단하세요. refresh=true와 term을 함께 주면 먼저 네트워크 동기화 후 조회합니다.',
+        description: '[로컬] 저장된 중간/기말시험 시간표를 조회합니다. course_id와 query를 생략하면 해당 term/exam_type의 전체 시간표를 반환합니다. course_id 지정 시 SIS 확정 course_code+분반 exact match를 우선하며, 교양대학 과목(course_code가 PDF에 없음)은 강의명+분반 정규화 매칭으로 fallback합니다(matched_by로 구분). 모두 실패하면 reason=EXACT_MATCH_NOT_FOUND와 함께 전체 후보 목록(candidates)을 반환하므로 호출자가 직접 판단하세요. refresh=true와 term을 함께 주면 먼저 네트워크 동기화 후 조회합니다.',
         inputSchema: {
           type: 'object',
           properties: {
             course_id: { type: 'number', description: '강의 ID로 조회' },
             query: { type: 'string', description: '강의명/교수명/과목코드 검색어' },
-            term: { type: 'string', description: '학기 필터 (예: 2026-1)' },
-            exam_type: { type: 'string', enum: ['final'], description: '시험 종류 (기본값: final)', default: 'final' },
+            term: { type: 'string', description: '학기 필터: YYYY-1, YYYY-2, YYYY-S(하계), YYYY-W(동계). 연도가 포함된 한글 학기명도 지원' },
+            exam_type: { type: 'string', enum: ['midterm', 'final'], description: '시험 종류: midterm(중간), final(기말). 기본값: final', default: 'final' },
             refresh: { type: 'boolean', description: '조회 전 시험 공지 동기화 수행. true면 term 필요', default: false },
           },
         },
@@ -945,6 +950,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof z.ZodError && (name === 'eclass_sync_exam_schedules' || name === 'eclass_get_exam_schedule')) {
+        const invalidTerm = err.issues.some((issue) => issue.path[0] === 'term');
+        const error = {
+          ok: false,
+          reason: invalidTerm ? 'INVALID_EXAM_TERM' : 'INVALID_INPUT',
+          message: sanitizeDebug(message),
+          ...(name === 'eclass_get_exam_schedule' ? { mode: 'local', candidates: [] } : {}),
+        };
+        return { isError: true, content: [{ type: 'text', text: JSON.stringify(error) }] };
+      }
       return {
         isError: true,
         content: [{ type: 'text', text: sanitizeDebug(message) }],

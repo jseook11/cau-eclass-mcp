@@ -1,11 +1,12 @@
-import type { ExamCache, ExamScheduleMatch } from '../../exam-cache.js';
+import type { ExamCache, ExamScheduleMatch, ExamType } from '../../exam-cache.js';
 import { syncExamSchedules } from './sync-exam-schedules.js';
+import { normalizeExamTerm } from '../../academic-term.js';
 
 export interface GetExamScheduleInput {
   course_id?: number;
   query?: string;
   term?: string;
-  exam_type?: 'final';
+  exam_type?: ExamType;
   refresh?: boolean;
 }
 
@@ -43,6 +44,7 @@ export async function getExamSchedule(
   cache: ExamCache,
   input: GetExamScheduleInput,
 ): Promise<GetExamScheduleResult> {
+  input = { ...input, term: input.term !== undefined ? normalizeExamTerm(input.term) : undefined };
   let refreshResult: Awaited<ReturnType<typeof syncExamSchedules>> | undefined;
   const examType = input.exam_type ?? 'final';
   const mode = input.refresh ? 'refreshed' as const : 'local' as const;

@@ -318,10 +318,10 @@ export function parseSisSourceId(raw: string): {
   course_code: string;
   section: string;
 } | null {
-  const match = /^(\d{4})_(\d{1,2})_([^_]+)_([^_]+)_([^_]+)_([^_]+)$/.exec(raw.trim());
+  const match = /^(\d{4})_(\d{1,2}|[SW])_([^_]+)_([^_]+)_([^_]+)_([^_]+)$/i.exec(raw.trim());
   if (!match) return null;
   return {
-    term: `${match[1]}-${match[2]}`,
+    term: `${match[1]}-${match[2].toUpperCase()}`,
     campus_code: match[3],
     department_code: match[4],
     course_code: match[5],

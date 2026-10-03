@@ -8,14 +8,19 @@ MCP를 사용하는 에이전트가 스스로 원인을 찾고 고치기 위한 
 ```text
 source discovery            src/tools/exams/notice-sources.ts (BUILTIN_EXAM_SOURCES, discoverExamSources)
 → notice HTML fetch         fetchNoticeDocument → fetchText
-→ notice HTML parsing       parseNoticeHtml → adapter_type switch (ge_notice / cse_notice / generic)
+→ notice HTML parsing       parseNoticeHtml → adapter_type switch (ge_notice / cse_notice / bne_notice / generic)
 → PDF download              downloadNoticePdf (attachment_url → %PDF magic 검증)
 → pdftotext -tsv            src/tools/exams/pdf-parser.ts parseExamPdf
-→ coordinate row parsing    parseExamScheduleTsv → layout별 컬럼 x좌표 범위
-→ row normalization         parseSoftwareLine / parseGeneralEducationLine
+→ coordinate row parsing    parseExamScheduleTsv → 캠퍼스 행 중심 / 시각적 행 + layout별 컬럼 범위
+→ row normalization         parseSoftwareLine / parseGeneralEducationLine / parseBusinessEconomicsLine
 → SQLite 저장               src/exam-cache.ts (~/.eclass-mcp/exams.db)
 → MCP query                 eclass_get_exam_schedule (course_code+section exact match)
 ```
+
+학기 키는 `src/academic-term.ts`에서 `YYYY-1/2/S/W`로 정규화한다.
+전용 게시판은 `ge_notice`, `cse_notice`, `bne_notice`이며 경영경제대학의
+계절학기 PDF는 년도·학기 열을 함께 검증한다. 동계 PDF의 명시 연도와
+학년도 차이는 원문을 유지하고 `note`에 남긴다.
 
 course metadata는 별도 경로다:
 

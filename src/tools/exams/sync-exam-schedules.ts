@@ -1,4 +1,4 @@
-import type { ExamCache, ExamDocumentRecord, ExamSourceRecord } from '../../exam-cache.js';
+import type { ExamCache, ExamDocumentRecord, ExamSourceRecord, ExamType } from '../../exam-cache.js';
 import {
   BUILTIN_EXAM_SOURCES,
   discoverExamSources,
@@ -7,10 +7,11 @@ import {
   selectSourcesForCourse,
 } from './notice-sources.js';
 import { parseExamPdf } from './pdf-parser.js';
+import { normalizeExamTerm } from '../../academic-term.js';
 
 export interface SyncExamSchedulesInput {
   term: string;
-  exam_type: 'final';
+  exam_type: ExamType;
   course_id?: number;
   force?: boolean;
   source_url?: string;
@@ -19,7 +20,7 @@ export interface SyncExamSchedulesInput {
 export interface SyncExamSchedulesResult {
   ok: boolean;
   term: string;
-  exam_type: 'final';
+  exam_type: ExamType;
   sources_checked: number;
   documents: Array<{
     document_id?: number;
@@ -52,6 +53,9 @@ function sourceFromUrl(sourceUrl: string): ExamSourceRecord {
       notice_board_url: sourceUrl,
       adapter_type: 'cse_notice',
     };
+  }
+  if (url.hostname === 'bne.cau.ac.kr') {
+    return { ...BUILTIN_EXAM_SOURCES.find((source) => source.adapter_type === 'bne_notice')!, notice_board_url: sourceUrl };
   }
   return {
     college: url.hostname,
@@ -98,7 +102,12 @@ async function resolveSources(cache: ExamCache, input: SyncExamSchedulesInput): 
   for (const source of discovered.sources) cache.upsertExamSource(source);
 
   const stored = cache.listExamSources();
-  const merged = stored.length > 0 ? stored : BUILTIN_EXAM_SOURCES;
+  // 이전 버전의 고정 공지 URL도 게시판 탐색으로 전환한다.
+  const merged = [...new Map(stored.map((source) => {
+    const builtin = BUILTIN_EXAM_SOURCES.find((item) => item.adapter_type === source.adapter_type);
+    const resolved = builtin ?? source;
+    return [resolved.notice_board_url, resolved] as const;
+  })).values()];
   const course = input.course_id !== undefined ? cache.getCourseMetadata(input.course_id) : undefined;
   return {
     sources: selectSourcesForCourse(merged, course),
@@ -109,7 +118,9 @@ async function resolveSources(cache: ExamCache, input: SyncExamSchedulesInput): 
 export async function syncExamSchedules(
   cache: ExamCache,
   input: SyncExamSchedulesInput,
+  parsePdf: typeof parseExamPdf = parseExamPdf,
 ): Promise<SyncExamSchedulesResult> {
+  input = { ...input, term: normalizeExamTerm(input.term) };
   const fetchedAt = new Date().toISOString();
   const partialFailures: SyncExamSchedulesResult['partial_failures'] = [];
   const documents: SyncExamSchedulesResult['documents'] = [];
@@ -119,7 +130,7 @@ export async function syncExamSchedules(
   for (const source of resolved.sources) {
     const sourceId = cache.upsertExamSource(source);
     try {
-      const parsedNotice = await fetchNoticeDocument(source);
+      const parsedNotice = await fetchNoticeDocument(source, input);
       if (!parsedNotice) {
         cache.updateExamSourceStatus(sourceId, 'no_exam_document', fetchedAt, null);
         continue;
@@ -136,8 +147,8 @@ export async function syncExamSchedules(
 
       const documentId = cache.upsertExamDocument(makeDocumentRecord(input, sourceId, downloaded, diffStatus, fetchedAt));
       let parsedRows = 0;
-      if (input.force || diffStatus !== 'unchanged') {
-        const parsedPdf = await parseExamPdf(downloaded.local_pdf_path, {
+      if (input.force || diffStatus !== 'unchanged' || !cache.hasSchedulesForDocument(documentId)) {
+        const parsedPdf = await parsePdf(downloaded.local_pdf_path, {
           term: input.term,
           exam_type: input.exam_type,
         });

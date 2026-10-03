@@ -8,6 +8,7 @@ function getDbPath(): string {
 }
 
 export type CourseMetadataSource = 'learningx_sis' | 'canvas_only';
+export type ExamType = 'midterm' | 'final';
 
 export interface CourseMetadataRecord {
   course_id: number;
@@ -358,7 +359,14 @@ export class ExamCache {
   }
 
   replaceSchedules(documentId: number, schedules: Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[]): void {
-    const deleteStmt = this.db.prepare('DELETE FROM exam_schedules WHERE source_document_id = ?');
+    const deleteStmt = this.db.prepare(`
+      DELETE FROM exam_schedules WHERE source_document_id IN (
+        SELECT d.id FROM exam_documents d
+        JOIN exam_documents current ON current.id = ?
+        WHERE d.term = current.term AND d.exam_type = current.exam_type
+          AND (d.id = current.id OR (current.source_id IS NOT NULL AND d.source_id = current.source_id))
+      )
+    `);
     const insertStmt = this.db.prepare(`
       INSERT INTO exam_schedules
         (source_document_id, term, exam_type, course_code, course_name, section, lecture_time, instructor, exam_method, exam_date, start_time, end_time, building, rooms, note, raw_text)
@@ -372,6 +380,11 @@ export class ExamCache {
       }
     });
     tx();
+  }
+
+  hasSchedulesForDocument(documentId: number): boolean {
+    return this.db.prepare('SELECT 1 FROM exam_schedules WHERE source_document_id = ? LIMIT 1')
+      .get(documentId) !== undefined;
   }
 
   // course_code + section exact match. fuzzy matching 없음 — 실패 판단은 호출자가 한다.
@@ -404,7 +417,7 @@ export class ExamCache {
   }): ExamScheduleMatch[] {
     const targetName = normalizeCourseName(input.course_name);
     const targetSection = input.section != null ? normalizeSection(input.section) : null;
-    return this.listSchedules({ term: input.term, exam_type: input.exam_type, limit: 2000 })
+    return this.listSchedules({ term: input.term, exam_type: input.exam_type })
       .filter((row) => {
         if (normalizeCourseName(row.course_name) !== targetName) return false;
         if (targetSection == null) return true;
@@ -434,10 +447,10 @@ export class ExamCache {
       const q = `%${input.query.trim()}%`;
       params.push(q, q, q);
     }
-    return this.selectSchedules(where, params, input.limit ?? 200);
+    return this.selectSchedules(where, params, input.limit);
   }
 
-  private selectSchedules(where: string[], params: unknown[], limit: number): ExamScheduleMatch[] {
+  private selectSchedules(where: string[], params: unknown[], limit?: number): ExamScheduleMatch[] {
     const sql = `
       SELECT
         s.*,
@@ -448,8 +461,8 @@ export class ExamCache {
       LEFT JOIN exam_documents d ON d.id = s.source_document_id
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY s.exam_date IS NULL, s.exam_date ASC, s.start_time IS NULL, s.start_time ASC, s.course_name COLLATE NOCASE ASC
-      LIMIT ?
+      ${limit !== undefined ? 'LIMIT ?' : ''}
     `;
-    return this.db.prepare(sql).all(...params, limit) as ExamScheduleMatch[];
+    return this.db.prepare(sql).all(...params, ...(limit !== undefined ? [limit] : [])) as ExamScheduleMatch[];
   }
 }

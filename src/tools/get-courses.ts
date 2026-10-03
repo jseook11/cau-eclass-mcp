@@ -1,5 +1,6 @@
 import { CanvasClient } from '../canvas-client.js';
 import type { Course } from '../types.js';
+import { extractExamTerms } from '../academic-term.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LOOKAHEAD_DAYS = 45;
@@ -36,7 +37,7 @@ export interface GetCoursesOptions {
 
 interface AcademicTermKey {
   year: number;
-  semester: 1 | 2;
+  semester: 1 | 2 | 'S' | 'W';
   canonical: string;
   rank: number;
 }
@@ -102,21 +103,23 @@ export function parseAcademicTerm(value: string | null | undefined): AcademicTer
   const korean = text.match(/(?:^|\D)(20\d{2})\s*(?:년|학년도)\s*([12])\s*학기(?:\D|$)/);
   const delimited = text.match(/(?:^|\D)(20\d{2})\s*[-_.]\s*([12])(?:\D|$)/);
   const match = korean ?? delimited;
-  if (!match) return null;
-  const year = Number(match[1]);
-  const semester = Number(match[2]) as 1 | 2;
+  const seasonal = !match ? extractExamTerms(text).find((term) => term.semester === 'S' || term.semester === 'W') : undefined;
+  if (!match && !seasonal) return null;
+  const year = match ? Number(match[1]) : seasonal!.year;
+  const semester = match ? Number(match[2]) as 1 | 2 : seasonal!.semester as 'S' | 'W';
   return {
     year,
     semester,
     canonical: `${year}-${semester}`,
-    rank: year * 10 + semester,
+    rank: year * 10 + ({ 1: 1, S: 2, 2: 3, W: 4 }[semester]),
   };
 }
 
 function nominalTermStart(term: AcademicTermKey): number {
-  // CAU regular semesters begin around March and September. This timestamp is
+  // Regular terms begin around March/September, seasonal terms around June/December. This timestamp is
   // used only when Canvas omits term dates; explicit dates always win.
-  return Date.UTC(term.year, term.semester === 1 ? 2 : 8, 1);
+  const month = { 1: 2, S: 5, 2: 8, W: 11 }[term.semester];
+  return Date.UTC(term.year, month, 1);
 }
 
 function normalizedDates(raw: RawCourse): { startAt: number | null; endAt: number | null } {

@@ -76,6 +76,7 @@ upsert가 아닌 최신 스냅샷으로 교체한다. 이전 강의 이름은 �
 - 입력: `{ scope?: "current" | "all" | "training" = "current" }`
   - `current`: `term.name`/term ID/시작·종료일과 `concluded`를 함께 사용해 선택한 이번 학기
     교과목. term 시작 45일 전부터 다음 학기를 선택할 수 있다.
+    1학기 → 하계(S) → 2학기 → 동계(W)를 구분하며 계절학기의 한글 이름과 `S/W` 코드도 인식한다.
   - `all`: Canvas의 `available`/`completed` workflow state에 있는 active enrollment 이력
     (이전 학기·교육 포함).
   - `training`: 학기 메타데이터와 무관하게 보수적인 예방/의무교육 제목 패턴에 해당하는
@@ -174,21 +175,31 @@ upsert가 아닌 최신 스냅샷으로 교체한다. 이전 강의 이름은 �
 
 ### eclass_sync_exam_schedules
 
-기말고사 공지 소스를 확인하고 PDF 시간표를 다운로드/정규화해 시험 DB에 저장한다.
+중간·기말시험 공지 소스를 확인하고 PDF 시간표를 다운로드/정규화해 시험 DB에 저장한다.
 
-- 입력: `{ term: string, exam_type?: 'final' = 'final', course_id?: number, force?: boolean = false, source_url?: string }`
+- 입력: `{ term: string, exam_type?: 'midterm' | 'final' = 'final', course_id?: number, force?: boolean = false, source_url?: string }`
 - 출력: `{ ok, term, exam_type, sources_checked, documents, partial_failures }`
+- 학기: `YYYY-1`(1학기), `YYYY-2`(2학기), `YYYY-S`(하계), `YYYY-W`(동계).
+  `"2026학년도 2학기"`, `"2026년 여름 계절학기"`, `"2025-동계 계절학기"`,
+  `"2026-summer"`, `"2025-winter"`도 지원하며 응답·DB·다운로드 경로는 표준 키로 통일한다.
+  연도나 여름/겨울 구분이 없는 모호한 입력은 `INVALID_EXAM_TERM`으로 거부한다.
 - 동작:
-  - `source_url`이 있으면 해당 공지만 처리한다.
-  - 없으면 중앙대 대학 목록에서 단과대 후보를 갱신하고, 교양대학/소프트웨어대학 전용 어댑터를 우선 사용한다.
-  - PDF 해시와 공지 본문 해시가 이전과 같고 `force=false`면 재파싱을 건너뛴다.
+  - `source_url`이 있으면 해당 공지만 처리한다. 공지 제목·첨부명이 요청한 학기와 시험 종류에 맞는지 확인하므로 기말 PDF를 중간시험으로 저장하지 않는다.
+  - 없으면 중앙대 대학 목록에서 단과대 후보를 갱신하고, 서울캠퍼스 교양대학/소프트웨어대학/경영경제대학 게시판에서 요청한 학기·시험 종류의 공지를 탐색한다. 정규학기는 시험 종류, 계절학기는 `계절`로 제목 검색하며 페이지 이동도 사용한다. 최대 20페이지를 넘으면 `EXAM_NOTICE_SEARCH_LIMIT`을 기록한다.
+  - 수정·변경 공지에 새 시간표 PDF가 있으면 최신 공지를 우선한다. 파싱 성공 시 같은 소스·학기·시험 종류의 이전 시간표 행을 교체한다.
+  - PDF 해시와 공지 본문 해시가 이전과 같고 `force=false`이며 저장된 시간표 행이 있으면 재파싱을 건너뛴다. 이전 파싱 실패로 행이 없는 문서는 다시 파싱한다.
+  - 중간·기말 문서와 시간표는 `term + exam_type`으로 분리하며 PDF도 시험 종류별 디렉터리에 저장한다.
+  - 교양대학의 `4/27(월)`, `10:00~10:50`, `310-B602` 표기를 날짜·시작/종료시간·건물/호실로 정규화한다. 날짜 범위나 `24시간 온라인 시험`처럼 단일 일시로 표현할 수 없는 값은 `note`와 `raw_text`에 보존한다.
+    캠퍼스 열이 있는 PDF는 해당 열을 기준으로 행을 묶어 줄바꿈된 과목명·강의시간도 보존한다. 여러 시험 일자가 있는 행은 `note`에 전체 날짜를 함께 남긴다.
+  - 경영경제대학의 계절학기 PDF는 행에 포함된 년도·학기(`1/2/S/W`)도 요청한 키와 비교해 다른 학기 행을 저장하지 않는다.
+  - 동계의 연도는 학년도다. `2025-W`의 연도 없는 `1/14`·`2/1`은 2026년 날짜, `12/30`은 2025년 날짜로 해석한다. PDF에 연도가 명시되어 있으면 원문을 보존하며 학년도와 맞지 않는 경영경제대학 날짜에는 `note`로 원문 확인 필요를 표시한다.
   - `pdftotext -tsv`가 없거나 PDF가 스캔본이면 문서 정보는 남기고 `partial_failures`에 `EXAM_PARSER_UNAVAILABLE` 또는 `EXAM_PARSER_UNSUPPORTED`를 기록한다.
 
 ### eclass_get_exam_schedule
 
 저장된 시험 시간표를 로컬 DB에서 조회한다. 평소 조회는 네트워크를 쓰지 않는다.
 
-- 입력: `{ course_id?: number, query?: string, term?: string, exam_type?: 'final' = 'final', refresh?: boolean = false }`
+- 입력: `{ course_id?: number, query?: string, term?: string, exam_type?: 'midterm' | 'final' = 'final', refresh?: boolean = false }`
 - 출력(성공): `{ ok: true, mode, matches, matched_by?, refresh_result? }`
   - `matched_by`: `"exact"`(course_code+section) 또는 `"name_section"`(교양 fallback).
 - 출력(실패): `{ ok: false, mode, reason, course_metadata?, candidates, refresh_result? }`
@@ -198,7 +209,12 @@ upsert가 아닌 최신 스냅샷으로 교체한다. 이전 강의 이름은 �
   - `course_metadata`에는 매칭에 쓴 확정값과 `source`/`sis_error`/Canvas 원본 필드가 들어 있다.
   - 기타 reason: `COURSE_METADATA_NOT_FOUND`(메타데이터 미동기화), `REFRESH_REQUIRES_TERM`, `NO_SCHEDULES`.
 - `query`만 주면 강의명/과목코드/교수명 LIKE 필터로 목록을 반환한다(추론 없음).
+- `term`은 동기화와 동일한 정규/계절학기 키·한글 별칭을 지원한다. 같은 학기의 별칭으로 조회해도 동일한 캐시를 사용한다. 잘못된 MCP 입력은 `INVALID_EXAM_TERM` 또는 `INVALID_INPUT`으로 반환한다.
+- `course_id`와 `query`를 생략하면 해당 학기·시험 종류의 저장된 시간표 전체를 반환한다. 전체 조회와 `candidates`는 200행 제한 없이 반환한다.
 - `refresh=true`를 쓰면 `term`이 필요하며, 먼저 `eclass_sync_exam_schedules`를 실행한 뒤 조회한다.
+- 예: `eclass_get_exam_schedule { term: "2026-1", exam_type: "midterm", refresh: true }`.
+- 계절학기 예: `eclass_get_exam_schedule { term: "2026-S", exam_type: "final", refresh: true }`.
+- `matches`는 동기화된 지원 소스의 시간표다. 공지가 없거나 파서가 지원하지 않는 다른 단과대 일정까지 포함한다고 해석하지 않는다.
 - 파서가 깨진 것으로 의심되면 `eclass_list_exam_sources`로 `last_status`/`last_error`를 확인하고 `docs/SELF_REPAIR.md` 절차를 따른다.
 
 ### eclass_list_exam_sources

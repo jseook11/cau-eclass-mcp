@@ -1,6 +1,6 @@
 ---
 name: eclass-cau
-description: 중앙대 eclass(LearningX/Canvas) 작업 — 강의·과제·성적 조회, 자료/동영상 다운로드, 과제 제출(dry-run), 기말시험 시간표, 강의계획서 검색. "이번 주 과제", "성적 알려줘", "강의자료 받아줘", "시험 언제", "교재 뭐 써", "과제 제출해줘" 같은 eclass 관련 요청에 사용. eclass_* MCP 툴이 연결돼 있을 때만 동작.
+description: 중앙대 eclass(LearningX/Canvas) 작업 — 강의·과제·성적 조회, 자료/동영상 다운로드, 과제 제출(dry-run), 중간·기말시험 시간표, 강의계획서 검색. "이번 주 과제", "성적 알려줘", "강의자료 받아줘", "시험 언제", "교재 뭐 써", "과제 제출해줘" 같은 eclass 관련 요청에 사용. eclass_* MCP 툴이 연결돼 있을 때만 동작.
 ---
 
 # eclass-cau

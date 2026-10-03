@@ -4,14 +4,20 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { ExamCache, type CourseMetadataRecord } from '../src/exam-cache.js';
-import { parseCseNoticeHtml, parseGeNoticeHtml, selectSourcesForCourse, BUILTIN_EXAM_SOURCES } from '../src/tools/exams/notice-sources.js';
+import { parseCseNoticeHtml, parseGeNoticeHtml, parseGenericNoticeHtml, parseBneNoticeHtml, parseExamNoticeLinks, fetchNoticeDocument, matchesExamNotice, selectSourcesForCourse, BUILTIN_EXAM_SOURCES } from '../src/tools/exams/notice-sources.js';
 import { parseExamScheduleTsv } from '../src/tools/exams/pdf-parser.js';
 import { normalizeSisCourseInfo, parseSisSourceId } from '../src/learningx-client.js';
 import { syncCourseMetadata, parseCanvasAccountName } from '../src/tools/exams/course-metadata.js';
 import { getExamSchedule } from '../src/tools/exams/get-exam-schedule.js';
+import { syncExamSchedules } from '../src/tools/exams/sync-exam-schedules.js';
+import { createEclassServer } from '../src/server.js';
 import type { CanvasClient } from '../src/canvas-client.js';
+import type { BrowserSession } from '../src/browser-session.js';
+import type { FileCache } from '../src/file-cache.js';
 
 function word(page: number, left: number, top: number, text: string, width = 8): string {
   return `5\t${page}\t0\t0\t0\t0\t${left}\t${top}\t${width}\t5\t100\t${text}`;
@@ -29,13 +35,43 @@ function withTempExamDb<T>(fn: (dbPath: string) => T): T {
   const dbPath = path.join(dir, 'exams.db');
   const prev = process.env.ECLASS_EXAM_DB_PATH;
   process.env.ECLASS_EXAM_DB_PATH = dbPath;
-  try {
-    return fn(dbPath);
-  } finally {
+  const cleanup = (): void => {
     if (prev === undefined) delete process.env.ECLASS_EXAM_DB_PATH;
     else process.env.ECLASS_EXAM_DB_PATH = prev;
     fs.rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    const result = fn(dbPath);
+    if (result instanceof Promise) return result.finally(cleanup) as T;
+    cleanup();
+    return result;
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+}
+
+function examFixture(college: 'ge' | 'cse'): string {
+  return fs.readFileSync(path.join(import.meta.dirname, 'fixtures', `exam-midterm-${college}-2026-1.tsv`), 'utf8');
+}
+
+function cseMidtermNotice(uid = 9151): string {
+  return `<div class="header"><h3>2026-1학기 중간시험 건물번호 수정 안내</h3><span>2026-04-15</span></div>
+    <div class="detail"><div class="files">
+    <span onclick="goLocation('/_module/bbs/download.php','${uid}','oktomato_bbs05')">(수정)2026-1학기 소프트웨어대학 중간시험 시간표.pdf</span>
+    </div></div>`;
+}
+
+function bneNotice(title: string, id = 1688): string {
+  return `<th colspan="6" class="tit">${title}</th><th>작성일</th><td>2026.07.01</td>
+    <ul class="fileList"><a href="/common/board/download.php?flag=NOTICE&amp;idx=${id}&amp;sort=1">${title}.pdf</a></ul>
+    <div class="viewCont">시간표 변경은 과목별 공지 확인</div>`;
+}
+
+function bneFixture(season: 'summer' | 'winter'): string {
+  // Official excerpts: bne.cau.ac.kr notice idx=1688 (summer), idx=1649 (winter).
+  const year = season === 'summer' ? 2026 : 2025;
+  return fs.readFileSync(path.join(import.meta.dirname, 'fixtures', `exam-bne-${season}-${year}.tsv`), 'utf8');
 }
 
 function sampleMetadata(overrides: Partial<CourseMetadataRecord> = {}): CourseMetadataRecord {
@@ -161,6 +197,232 @@ test('parseCseNoticeHtml extracts goLocation download link', () => {
   assert.equal(parsed.title, '2026-1학기 기말시험 시간표 안내');
   assert.equal(parsed.posted_at, '2026-06-09');
   assert.equal(parsed.attachment_url, 'https://cse.cau.ac.kr/_module/bbs/download.php?uid=9280&code=oktomato_bbs05');
+});
+
+test('notice adapters select the matching PDF and reject another term or exam type', () => {
+  const filter = { term: '2026-1', exam_type: 'midterm' as const };
+  const html = `<p class="tit"><strong>2026학년도 1학기 서울캠퍼스 중간시험 시간표</strong></p>
+    <div class="view_file"><div class="left">첨부파일</div><ul>
+      <li><a href="rules.pdf"><b>시험 지침.pdf</b></a></li>
+      <li><a href="schedule.xlsx"><b>중간시험 시간표.xlsx</b></a></li>
+      <li><a href="midterm.pdf"><b>2026-1학기 중간시험 시간표.pdf</b></a></li>
+    </ul></div><div class="view_con">시험 안내</div> <!-- // view_con -->`;
+  const noticeUrl = 'https://ge.cau.ac.kr/board_notice_view.php?no=1571';
+  assert.equal(parseGeNoticeHtml(html, noticeUrl, filter)?.attachment_url, 'https://ge.cau.ac.kr/midterm.pdf');
+  assert.equal(parseGeNoticeHtml(html, noticeUrl, { ...filter, exam_type: 'final' }), null);
+  assert.equal(parseGeNoticeHtml(html, noticeUrl, { ...filter, term: '2026-2' }), null);
+
+  const cse = cseMidtermNotice().replace('<div class="files">', `<div class="files">
+    <span onclick="goLocation('/_module/bbs/download.php','1','oktomato_bbs05')">지침.hwp</span>`);
+  assert.match(parseCseNoticeHtml(cse, 'https://cse.cau.ac.kr/sub05/sub0501.php?uid=3352', filter)?.attachment_url ?? '', /uid=9151/);
+  assert.equal(parseCseNoticeHtml(cse, noticeUrl, { ...filter, exam_type: 'final' }), null);
+
+  const generic = '<h2>2026-1학기 중간시험 시간표</h2><a href="midterm.pdf">midterm.pdf</a>';
+  assert.ok(parseGenericNoticeHtml(generic, 'https://college.cau.ac.kr/notice', filter));
+});
+
+test('parseExamNoticeLinks filters term/type/campus and prioritizes revised notices', () => {
+  const filter = { term: '2026-1', exam_type: 'midterm' as const };
+  const board = 'https://cse.cau.ac.kr/sub05/sub0501.php';
+  const html = `<a href="?nmode=view&uid=3349">2026-1학기 중간시험 시간표 안내</a>
+    <a href="?nmode=view&amp;uid=3352"><!-- comment -->2026-1학기 중간시험 건물번호 수정 안내</a>
+    <a href="?nmode=view&uid=3396">2026-1학기 기말시험 시간표 안내</a>
+    <a href="?nmode=view&uid=3459">2026학년도 2학기 중간시험 시간표 안내</a>
+    <a href="?nmode=view&uid=3346">2026학년도 1학기 중간시험 공정관리 지침</a>
+    <a href="https://evil.example/?uid=9999">2026-1학기 중간시험 시간표</a>`;
+  assert.deepEqual(parseExamNoticeLinks(html, board, filter).map((url) => new URL(url).searchParams.get('uid')), ['3352', '3349']);
+  const geHtml = `<a href="board_notice_view.php?no=1572">2026-1학기 다빈치캠퍼스 중간시험 시간표</a>
+    <a href="board_notice_view.php?no=1571">2026-1학기 서울캠퍼스 중간시험 시간표</a>`;
+  assert.equal(parseExamNoticeLinks(geHtml, 'https://ge.cau.ac.kr/board_notice.php', filter).length, 1);
+});
+
+test('fetchNoticeDocument searches later pages and never relabels a final notice as midterm', async () => {
+  const originalFetch = globalThis.fetch;
+  const visited: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    visited.push(url.toString());
+    if (url.searchParams.has('uid')) return new Response(cseMidtermNotice());
+    assert.equal(url.searchParams.get('keyword'), '중간');
+    if (url.searchParams.get('offset') === '1') {
+      return new Response('<a href="?offset=2&nmode=list">2</a>');
+    }
+    return new Response('<a href="?nmode=view&uid=3352">2026-1학기 중간시험 수정 안내</a>');
+  };
+  try {
+    const source = BUILTIN_EXAM_SOURCES.find((source) => source.adapter_type === 'cse_notice')!;
+    const result = await fetchNoticeDocument(source, { term: '2026-1', exam_type: 'midterm' });
+    assert.match(result?.notice_url ?? '', /uid=3352/);
+    assert.equal(visited.length, 3);
+    globalThis.fetch = async () => new Response(cseMidtermNotice().replaceAll('중간', '기말'));
+    const wrongType = await fetchNoticeDocument({ ...source, notice_board_url: `${source.notice_board_url}?uid=3396` }, {
+      term: '2026-1', exam_type: 'midterm',
+    });
+    assert.equal(wrongType, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('parseExamScheduleTsv reads actual general-education midterm columns and special dates', () => {
+  const result = parseExamScheduleTsv(examFixture('ge'), { term: '2026-1', exam_type: 'midterm' });
+  assert.ok(result.ok);
+  assert.equal(result.schedules.length, 48);
+  assert.ok(result.schedules.every((row) => row.exam_type === 'midterm'));
+  const science = result.schedules.find((row) => row.course_name === '과학기술과현대사회' && row.section === '02')!;
+  assert.equal(science.instructor, '김광호');
+  assert.equal(science.exam_date, '2026-04-27');
+  assert.equal(science.start_time, '10:00');
+  assert.equal(science.end_time, '10:50');
+  assert.equal(science.building, '310');
+  assert.equal(science.rooms, 'B602');
+  const replacement = result.schedules.find((row) => row.section === '01')!;
+  assert.equal(replacement.exam_method, '과제물대체');
+  assert.equal(replacement.exam_date, null);
+  const range = result.schedules.find((row) => row.course_name === '공공기관NCS분석')!;
+  assert.equal(range.exam_date, null);
+  assert.match(range.note ?? '', /3\/31.*4\/13/);
+});
+
+test('parseExamScheduleTsv reads actual compact software midterm PDF including corrected rooms', () => {
+  const result = parseExamScheduleTsv(examFixture('cse'), { term: '2026-1', exam_type: 'midterm' });
+  assert.ok(result.ok);
+  assert.equal(result.schedules.length, 5);
+  const corrected = result.schedules.find((row) => row.course_code === '32734' && row.section === '02')!;
+  assert.equal(corrected.course_name, '컴퓨터시스템및어셈블리언어');
+  assert.equal(corrected.exam_date, '2026-04-23');
+  assert.equal(corrected.building, '310');
+  assert.equal(corrected.rooms, '727 729');
+  assert.equal(result.schedules[0].start_time, '09:00');
+  assert.equal(result.schedules.find((row) => row.course_code === '17437')?.exam_method, '4.미실시');
+});
+
+test('seasonal notices distinguish regular, summer, winter and academic years', () => {
+  const url = 'https://bne.cau.ac.kr/bneNews/notice/view.php?idx=1688';
+  const summer = parseBneNoticeHtml(bneNotice('2026-하계 계절학기 중간시험 유형 및 시간표'), url, { term: '2026-S', exam_type: 'midterm' });
+  assert.ok(summer);
+  assert.equal(summer.posted_at, '2026-07-01');
+  assert.equal(summer.attachment_url, 'https://bne.cau.ac.kr/common/board/download.php?flag=NOTICE&idx=1688&sort=1');
+  for (const term of ['2026-1', '2026-2', '2026-W', '2025-S']) {
+    assert.equal(matchesExamNotice(summer, { term, exam_type: 'midterm' }), false, term);
+  }
+  assert.ok(matchesExamNotice(summer, { term: '2026년 여름 계절학기', exam_type: 'midterm' }));
+  const winter = parseBneNoticeHtml(bneNotice('2025-동계 계절학기 기말시험 유형 및 시간표'), url, { term: '2025-W', exam_type: 'final' });
+  assert.ok(winter);
+  assert.equal(matchesExamNotice(winter, { term: '2026-W', exam_type: 'final' }), false);
+
+  const combined = `<th class="tit">2025-동계 계절학기 중간/기말시험 시간표</th>
+    <ul class="fileList"><a href="midterm.pdf">2025-W 중간시험 시간표.pdf</a>
+    <a href="final.pdf">2025-W 기말시험 시간표.pdf</a></ul>`;
+  assert.match(parseBneNoticeHtml(combined, url, { term: '2025-W', exam_type: 'final' })?.attachment_url ?? '', /final\.pdf$/);
+});
+
+test('fetchNoticeDocument discovers both seasonal exam types on the BNE board', async () => {
+  const originalFetch = globalThis.fetch;
+  const source = BUILTIN_EXAM_SOURCES.find((source) => source.adapter_type === 'bne_notice')!;
+  try {
+    for (const [term, season] of [['2026-S', '2026-하계'], ['2025-W', '2025-동계']]) {
+      for (const examType of ['midterm', 'final'] as const) {
+        const title = `${season} 계절학기 ${examType === 'midterm' ? '중간' : '기말'}시험 시간표`;
+        globalThis.fetch = async (input) => {
+          const url = new URL(String(input));
+          if (url.pathname.endsWith('/view.php')) return new Response(bneNotice(title));
+          assert.equal(url.searchParams.get('s_word'), '계절');
+          assert.equal(url.searchParams.get('s_key'), 'TITLE');
+          return new Response(`<a href="/bneNews/notice/view.php?idx=1688">${title}</a>`);
+        };
+        assert.equal((await fetchNoticeDocument(source, { term, exam_type: examType }))?.title, title);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('seasonal PDF parsing uses row term codes and preserves full winter dates', () => {
+  const summer = parseExamScheduleTsv(bneFixture('summer'), { term: '2026년 하계 계절학기', exam_type: 'midterm' });
+  assert.ok(summer.ok);
+  assert.equal(summer.layout, 'business_economics');
+  assert.equal(summer.schedules.length, 4);
+  assert.ok(summer.schedules.every((row) => row.term === '2026-S'));
+  assert.equal(summer.schedules[0].course_code, '35703');
+  assert.equal(summer.schedules[0].exam_date, '2026-07-03');
+  assert.equal(summer.schedules[0].rooms, '311');
+  const mismatch = parseExamScheduleTsv(bneFixture('summer'), { term: '2026-1', exam_type: 'midterm' });
+  assert.ok(!mismatch.ok);
+
+  const winter = parseExamScheduleTsv(bneFixture('winter'), { term: '2025-W', exam_type: 'final' });
+  assert.ok(winter.ok);
+  assert.equal(winter.schedules.length, 4);
+  assert.equal(winter.schedules[0].exam_date, '2026-01-14');
+  const suspicious = winter.schedules.find((row) => row.course_code === '34540')!;
+  assert.equal(suspicious.exam_date, '2025-01-14');
+  assert.match(suspicious.note ?? '', /원문 시험 날짜 확인 필요/);
+});
+
+test('second-semester PDFs preserve changed columns, wrapped names and multiple exam dates', () => {
+  const readFixture = (type: string) => fs.readFileSync(path.join(import.meta.dirname, 'fixtures', `exam-ge-${type}-2025-2.tsv`), 'utf8');
+  const midterm = parseExamScheduleTsv(readFixture('midterm'), { term: '2025년 2학기', exam_type: 'midterm' });
+  assert.ok(midterm.ok);
+  assert.equal(midterm.schedules.length, 3);
+  const reading = midterm.schedules.find((row) => row.course_name === 'ACADEMIC READING')!;
+  assert.equal(reading.instructor, '이안애시브리지');
+  assert.match(reading.note ?? '', /대면수업/);
+  const final = parseExamScheduleTsv(readFixture('final'), { term: '2025-2', exam_type: 'final' });
+  assert.ok(final.ok);
+  assert.equal(final.schedules.length, 5);
+  const wrapped = final.schedules.find((row) => row.course_name === 'BRAND COMPETITION AND WINNING STRATEGIES')!;
+  assert.equal(wrapped.section, '01');
+  assert.equal(wrapped.exam_date, '2025-12-18');
+  const communication = final.schedules.find((row) => row.course_name === 'COMMUNICATION IN ENGLISH')!;
+  assert.equal(communication.section, '01');
+  assert.match(communication.lecture_time ?? '', /월.*수/);
+  assert.match(communication.note ?? '', /2025-12-15.*2025-12-17/);
+  assert.equal(final.schedules[2].building, '303');
+  assert.equal(final.schedules[2].rooms, '802-1');
+});
+
+test('summer final PDF supports its compact print layout independently of midterm layout', () => {
+  const fixture = fs.readFileSync(path.join(import.meta.dirname, 'fixtures', 'exam-bne-summer-final-2026.tsv'), 'utf8');
+  const result = parseExamScheduleTsv(fixture, { term: '2026-S', exam_type: 'final' });
+  assert.ok(result.ok);
+  assert.equal(result.schedules.length, 2);
+  assert.equal(result.schedules[0].course_code, '35703');
+  assert.equal(result.schedules[0].section, '01');
+  assert.equal(result.schedules[0].exam_date, '2026-07-15');
+  assert.equal(result.schedules[0].end_time, '14:45');
+  assert.equal(result.schedules[0].rooms, '311');
+});
+
+test('second-semester software PDFs group font offsets within landscape table rows', () => {
+  for (const type of ['midterm', 'final'] as const) {
+    const fixture = fs.readFileSync(path.join(import.meta.dirname, 'fixtures', `exam-cse-${type}-2025-2.tsv`), 'utf8');
+    const result = parseExamScheduleTsv(fixture, { term: '2025-2', exam_type: type });
+    assert.ok(result.ok);
+    assert.equal(result.schedules.length, 3);
+    const programming = result.schedules.find((row) => row.course_code === '47710')!;
+    assert.equal(programming.section, '01');
+    assert.equal(programming.course_name, '프로그래밍');
+    assert.equal(programming.instructor, '이창하');
+    assert.equal(programming.start_time, '09:00');
+    assert.equal(programming.rooms, 'B311');
+    assert.equal(programming.exam_date, type === 'midterm' ? '2025-10-20' : '2025-12-15');
+  }
+});
+
+test('short winter dates roll over only January and February', () => {
+  const makeTsv = (date: string) => tsv([
+    word(1, 20, 40, '교양대학'), word(1, 24, 66, '캠퍼스'),
+    word(1, 28, 110, '서울'),
+    word(1, 58, 110, '시험과목'), word(1, 295, 110, '01'), word(1, 344, 110, '교수'),
+    word(1, 497, 110, '대면시험'), word(1, 592, 110, date),
+    word(1, 672, 110, '10:00~10:50'), word(1, 759, 110, '310-727'),
+  ]);
+  for (const [date, expected] of [['1/14(수)', '2026-01-14'], ['2/1(일)', '2026-02-01'], ['12/30(화)', '2025-12-30']]) {
+    const result = parseExamScheduleTsv(makeTsv(date), { term: '2025-W', exam_type: 'final' });
+    assert.ok(result.ok);
+    assert.equal(result.schedules[0].exam_date, expected);
+  }
 });
 
 test('parseExamScheduleTsv parses software-college rows', () => {
@@ -478,6 +740,204 @@ test('getExamSchedule returns full candidate list when exact match fails', async
     }
     cache.getDb().close();
   });
+});
+
+test('syncExamSchedules discovers midterm PDFs, retries empty caches and replaces superseded rows', async () => {
+  await withTempExamDb(async (dbPath) => {
+    const cache = new ExamCache();
+    insertSampleSchedule(cache);
+    cache.upsertCourseMetadata([sampleMetadata({ course_code: '32734', section: '02' })]);
+    cache.upsertExamSource({ ...BUILTIN_EXAM_SOURCES[1], notice_board_url: 'https://cse.cau.ac.kr/sub05/sub0501.php?uid=3396' });
+    const originalFetch = globalThis.fetch;
+    const previousDownloadDir = process.env.ECLASS_EXAM_DOWNLOAD_DIR;
+    process.env.ECLASS_EXAM_DOWNLOAD_DIR = path.join(path.dirname(dbPath), 'downloads');
+    let attachmentId = 9151;
+    let parseCalls = 0;
+    let failParsing = true;
+    globalThis.fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'www.cau.ac.kr') return new Response('');
+      if (url.pathname === '/_module/bbs/download.php') return new Response('%PDF test fixture');
+      if (url.searchParams.has('uid')) {
+        assert.notEqual(url.searchParams.get('uid'), '3396', 'legacy fixed final notice must not be fetched');
+        return new Response(cseMidtermNotice(attachmentId));
+      }
+      assert.equal(url.searchParams.get('keyword'), '중간');
+      return new Response('<a href="?nmode=view&uid=3352">2026-1학기 중간시험 건물번호 수정 안내</a>');
+    };
+    const parsePdf = async (_pdfPath: string, input: { term: string; exam_type: string }) => {
+      parseCalls++;
+      if (failParsing) return { ok: false as const, error_code: 'EXAM_PARSER_UNAVAILABLE' as const, message: 'not installed', retryable: false };
+      return parseExamScheduleTsv(examFixture('cse'), input);
+    };
+    try {
+      const input = { term: '2026-1', exam_type: 'midterm' as const, course_id: 10 };
+      const failed = await syncExamSchedules(cache, input, parsePdf);
+      assert.equal(failed.sources_checked, 1);
+      assert.match(failed.partial_failures[0].reason, /EXAM_PARSER_UNAVAILABLE/);
+      assert.equal(cache.listSchedules({ exam_type: 'midterm' }).length, 0);
+
+      failParsing = false;
+      const synced = await syncExamSchedules(cache, input, parsePdf);
+      assert.equal(synced.documents[0].diff_status, 'unchanged');
+      assert.equal(synced.documents[0].parsed_rows, 5);
+      const exact = await getExamSchedule(cache, input);
+      assert.ok(exact.ok);
+      assert.equal(exact.matched_by, 'exact');
+      assert.equal(exact.matches[0].building, '310');
+
+      const unchanged = await syncExamSchedules(cache, input, parsePdf);
+      assert.equal(unchanged.documents[0].parsed_rows, 0);
+      assert.equal(parseCalls, 2);
+      attachmentId = 9251;
+      const revised = await syncExamSchedules(cache, input, parsePdf);
+      assert.equal(revised.documents[0].diff_status, 'new');
+      assert.equal(cache.listSchedules({ exam_type: 'midterm' }).length, 5);
+      assert.ok(cache.listSchedules({ exam_type: 'midterm' }).every((row) => row.source_document_id === revised.documents[0].document_id));
+      assert.equal(cache.listSchedules({ exam_type: 'final' }).length, 3);
+      await syncExamSchedules(cache, { ...input, force: true }, parsePdf);
+      assert.equal(parseCalls, 4);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousDownloadDir === undefined) delete process.env.ECLASS_EXAM_DOWNLOAD_DIR;
+      else process.env.ECLASS_EXAM_DOWNLOAD_DIR = previousDownloadDir;
+      cache.getDb().close();
+    }
+  });
+});
+
+test('MCP exposes midterm and returns the complete timetable while final remains the default', async () => {
+  await withTempExamDb(async () => {
+    const cache = new ExamCache();
+    insertSampleSchedule(cache);
+    const previous = cache.findExamDocument('2026-1', 'final', 'https://cse.cau.ac.kr/a.pdf')!;
+    const documentId = cache.upsertExamDocument({ ...previous, exam_type: 'midterm', attachment_url: 'https://cse.cau.ac.kr/midterm.pdf' });
+    const fixture = parseExamScheduleTsv(examFixture('ge'), { term: '2026-1', exam_type: 'midterm' });
+    assert.ok(fixture.ok);
+    cache.replaceSchedules(documentId, Array.from({ length: 250 }, (_, i) => ({
+      ...fixture.schedules[0], course_name: `교양과목${String(i).padStart(3, '0')}`,
+    })));
+    const server = createEclassServer({
+      username: 'test', session: {} as BrowserSession, fileCache: {} as FileCache, examCache: cache,
+    });
+    const client = new Client({ name: 'exam-test', version: '0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      for (const name of ['eclass_sync_exam_schedules', 'eclass_get_exam_schedule']) {
+        const tool = tools.find((tool) => tool.name === name)!;
+        const properties = tool.inputSchema.properties as Record<string, { enum?: string[]; default?: string }>;
+        assert.deepEqual(properties.exam_type.enum, ['midterm', 'final']);
+        assert.equal(properties.exam_type.default, 'final');
+      }
+      const midterm = await client.callTool({ name: 'eclass_get_exam_schedule', arguments: { term: '2026-1', exam_type: 'midterm' } });
+      assert.equal(midterm.isError, false);
+      const result = midterm.structuredContent as { matches: Array<{ exam_type: string }> };
+      assert.equal(result.matches.length, 250);
+      assert.ok(result.matches.every((row) => row.exam_type === 'midterm'));
+      const final = await client.callTool({ name: 'eclass_get_exam_schedule', arguments: { term: '2026-1' } });
+      assert.equal((final.structuredContent as { matches: unknown[] }).matches.length, 3);
+      const candidates = await getExamSchedule(cache, { term: '2026-1', exam_type: 'midterm', course_id: 999 });
+      assert.ok(!candidates.ok);
+      assert.equal(candidates.candidates.length, 250);
+      const query = await getExamSchedule(cache, { term: '2026-1', exam_type: 'midterm', query: '교양과목249' });
+      assert.ok(query.ok);
+      assert.equal(query.matches.length, 1);
+      assert.equal(cache.listSchedules({ exam_type: 'midterm', limit: 10 }).length, 10);
+    } finally {
+      await client.close();
+      await server.close();
+      cache.getDb().close();
+    }
+  });
+});
+
+test('sync and MCP queries isolate all four semesters and both exam types with alias inputs', async () => {
+  await withTempExamDb(async (dbPath) => {
+    const cache = new ExamCache();
+    const originalFetch = globalThis.fetch;
+    const previousDir = process.env.ECLASS_EXAM_DOWNLOAD_DIR;
+    process.env.ECLASS_EXAM_DOWNLOAD_DIR = path.join(path.dirname(dbPath), 'downloads');
+    const terms = [
+      { key: '2026-1', label: '2026학년도 1학기' },
+      { key: '2026-2', label: '2026년 2학기' },
+      { key: '2026-S', label: '2026 하계 계절학기' },
+      { key: '2025-W', label: '2025 동계 계절학기' },
+    ];
+    const cases = terms.flatMap((term) => ['midterm', 'final'].map((type, i) => ({
+      ...term, type: type as 'midterm' | 'final', id: terms.indexOf(term) * 2 + i + 1000,
+    })));
+    let active = cases[0];
+    let parseCalls = 0;
+    let fetchCalls = 0;
+    globalThis.fetch = async (input) => {
+      fetchCalls++;
+      const url = new URL(String(input));
+      if (url.pathname.includes('download.php')) return new Response('%PDF fixture');
+      return new Response(bneNotice(`${active.label} ${active.type === 'midterm' ? '중간' : '기말'}시험 시간표`, active.id));
+    };
+    const parser = async (_path: string, input: { term: string; exam_type: string }) => {
+      parseCalls++;
+      assert.equal(input.term, active.key);
+      return parseExamScheduleTsv(tsv([
+        word(1, 104, 39, '교양대학'), word(1, 19, 110, '시험과목'), word(1, 166, 110, '01'),
+        word(1, 367, 110, '대면시험'), word(1, 491, 110, '2026-01-14'),
+        word(1, 591, 110, '10:00'), word(1, 660, 110, '10:50'),
+      ]), input);
+    };
+    const sourceUrl = (id: number) => `https://bne.cau.ac.kr/bneNews/notice/view.php?idx=${id}`;
+    const server = createEclassServer({ username: 'test', session: {} as BrowserSession, fileCache: {} as FileCache, examCache: cache });
+    const client = new Client({ name: 'semester-test', version: '0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      for (const item of cases) {
+        active = item;
+        const result = await syncExamSchedules(cache, { term: item.label, exam_type: item.type, source_url: sourceUrl(item.id) }, parser);
+        assert.ok(result.ok);
+        assert.equal(result.term, item.key);
+        assert.equal(result.documents[0].parsed_rows, 1);
+        assert.ok(result.documents[0].local_pdf_path.includes(path.join(item.key, item.type)));
+      }
+      assert.equal(cache.listSchedules({}).length, 8);
+      await client.listTools();
+      for (const item of cases) {
+        const result = await client.callTool({ name: 'eclass_get_exam_schedule', arguments: { term: item.label, exam_type: item.type } });
+        assert.equal(result.isError, false);
+        const matches = (result.structuredContent as { matches: Array<{ term: string; exam_type: string }> }).matches;
+        assert.equal(matches.length, 1);
+        assert.equal(matches[0].term, item.key);
+        assert.equal(matches[0].exam_type, item.type);
+      }
+      const again = await syncExamSchedules(cache, { term: active.key, exam_type: active.type, source_url: sourceUrl(active.id) }, parser);
+      assert.equal(again.documents[0].diff_status, 'unchanged');
+      assert.equal(parseCalls, 8);
+      const beforeInvalid = fetchCalls;
+      const invalid = await client.callTool({ name: 'eclass_sync_exam_schedules', arguments: { term: '2026 계절학기' } });
+      assert.equal(invalid.isError, true);
+      assert.equal(invalid.structuredContent?.reason, 'INVALID_EXAM_TERM');
+      assert.equal(fetchCalls, beforeInvalid);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousDir === undefined) delete process.env.ECLASS_EXAM_DOWNLOAD_DIR;
+      else process.env.ECLASS_EXAM_DOWNLOAD_DIR = previousDir;
+      await client.close();
+      await server.close();
+      cache.getDb().close();
+    }
+  });
+});
+
+test('SIS source IDs preserve seasonal S/W codes for exam course matching', () => {
+  assert.equal(parseSisSourceId('2026_S_1_3B510_35703_01')?.term, '2026-S');
+  assert.equal(parseSisSourceId('2025_w_1_3B510_27803_01')?.term, '2025-W');
+  const result = normalizeSisCourseInfo({ sis_source_id: '2025_W_1_3B510_27803_01', course_code: '경영정보시스템 01분반' });
+  assert.ok(result.ok);
+  assert.equal(result.info.course_code, '27803');
+  assert.equal(result.info.term, '2025-W');
 });
 
 test('parseCanvasAccountName parses live account name formats', () => {
