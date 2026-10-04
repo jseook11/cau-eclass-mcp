@@ -32,6 +32,7 @@ import { debugLog } from './secrets.js';
 import { fetchCourseResourceViaApi } from './learningx-client.js';
 import { parseModulebuilderItems, parseResourceItems } from './resource-items.js';
 import { sanitizeFileName, materialStorageKey } from './utils.js';
+import { resolveDownloadFilename } from './download-filename.js';
 import {
   isOcsViewerUrl,
   resolveLaunchFromContext,
@@ -1410,7 +1411,6 @@ export class BrowserSession {
     }
     const dir = path.join(expandTilde(downloadDir), String(courseId), materialStorageKey(resourceId));
     await fs.mkdir(dir, { recursive: true });
-    const destPath = path.join(dir, safeName);
 
     debugLog('browser-session', `Downloading courseresource for course ${courseId}`);
 
@@ -1527,6 +1527,12 @@ export class BrowserSession {
         if (!apiResponse.ok()) {
           throw new Error(`File fetch failed: ${apiResponse.status()}`);
         }
+        const headers = apiResponse.headers();
+        const resolvedName = resolveDownloadFilename(safeName, {
+          contentDisposition: headers['content-disposition'],
+          contentType: headers['content-type'],
+        });
+        const destPath = path.join(dir, resolvedName);
         const buffer = await apiResponse.body();
         await fs.writeFile(destPath, buffer);
         debugLog('browser-session', 'Downloaded via OCS viewer intercept');

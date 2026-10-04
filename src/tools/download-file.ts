@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { FileCache } from '../file-cache.js';
+import { resolveDownloadFilename } from '../download-filename.js';
 import { expandTilde, sanitizeFileName, materialStorageKey } from '../utils.js';
 
 function getDownloadDir(): string {
@@ -14,43 +15,6 @@ const CREDENTIAL_ALLOWED_ORIGINS = new Set([
 
 const MAX_DOWNLOAD_REDIRECTS = 5;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
-
-const MIME_TO_EXT: Record<string, string> = {
-  'application/pdf': '.pdf',
-  'application/zip': '.zip',
-  'application/x-zip-compressed': '.zip',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-  'application/vnd.ms-powerpoint': '.ppt',
-  'application/msword': '.doc',
-  'application/vnd.ms-excel': '.xls',
-  'image/jpeg': '.jpg',
-  'image/png': '.png',
-  'image/gif': '.gif',
-  'video/mp4': '.mp4',
-  'text/plain': '.txt',
-  'text/html': '.html',
-};
-
-function resolveFilename(safeName: string, response: Response): string {
-  if (path.extname(safeName)) return safeName;
-
-  const disposition = response.headers.get('content-disposition');
-  if (disposition) {
-    const match = /filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i.exec(disposition);
-    if (match) {
-      const ext = path.extname(decodeURIComponent(match[1].trim()));
-      if (ext) return safeName + ext;
-    }
-  }
-
-  const contentType = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-  const ext = MIME_TO_EXT[contentType];
-  if (ext) return safeName + ext;
-
-  return safeName;
-}
 
 function assertAllowedOrigin(url: string): void {
   let parsed: URL;
@@ -171,7 +135,10 @@ export async function downloadFileToDisk(
     throw new Error(`Download failed: ${response.status}`);
   }
 
-  const resolvedName = resolveFilename(safeName, response);
+  const resolvedName = resolveDownloadFilename(safeName, {
+    contentDisposition: response.headers.get('content-disposition'),
+    contentType: response.headers.get('content-type'),
+  });
   const localPath = path.join(dir, resolvedName);
 
   const buffer = await response.arrayBuffer();
