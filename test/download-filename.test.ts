@@ -8,6 +8,25 @@ import { BrowserSession } from '../src/browser-session.js';
 import { downloadFileToDisk } from '../src/tools/download-file.js';
 
 const cases = [
+  ...['main.py', 'main.c', 'main.cpp', 'main.PY', 'data.myformat', 'archive.7z'].map((name) => ({
+    name, headers: { 'content-type': 'text/plain' }, expected: name,
+  })),
+  {
+    name: 'main.py',
+    headers: { 'content-disposition': 'attachment; filename="download.txt"', 'content-type': 'text/plain' },
+    expected: 'main.py',
+  },
+  {
+    name: 'source',
+    headers: { 'content-disposition': 'attachment; filename="main.py"', 'content-type': 'text/plain' },
+    expected: 'source.py',
+  },
+  { name: 'algorithm_02.2', headers: { 'content-type': 'application/pdf' }, expected: 'algorithm_02.2.pdf' },
+  {
+    name: 'algorithm_02.2_divide',
+    headers: { 'content-disposition': 'attachment; filename="slides.pdf"', 'content-type': 'application/octet-stream' },
+    expected: 'algorithm_02.2_divide.pdf',
+  },
   { name: '강의자료', headers: { 'content-type': 'application/pdf' }, expected: '강의자료.pdf' },
   { name: 'algorithm_02.2_divide', headers: { 'content-type': 'application/pdf' }, expected: 'algorithm_02.2_divide.pdf' },
   { name: '강의자료.pdf', headers: { 'content-type': 'application/pdf' }, expected: '강의자료.pdf' },

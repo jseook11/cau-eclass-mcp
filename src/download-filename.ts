@@ -18,14 +18,10 @@ const MIME_TO_EXT: Record<string, string> = {
   'text/html': '.html',
 };
 
-const SUPPORTED_EXTENSIONS = new Set([
-  ...Object.values(MIME_TO_EXT),
-  '.jpeg', '.hwp', '.hwpx', '.md', '.csv', '.json',
-]);
-
-function supportedExtension(name: string): string | undefined {
+function fileExtension(name: string): string | undefined {
   const ext = path.extname(name);
-  return SUPPORTED_EXTENSIONS.has(ext.toLowerCase()) ? ext : undefined;
+  // Preserve unknown suffixes such as .py and .7z, but not lecture numbering.
+  return /^\.(?=[a-z0-9]*[a-z])[a-z0-9]+$/i.test(ext) ? ext : undefined;
 }
 
 export function resolveDownloadFilename(
@@ -33,12 +29,12 @@ export function resolveDownloadFilename(
   headers: { contentDisposition?: string | null; contentType?: string | null },
 ): string {
   // Dots in lecture titles (such as algorithm_02.2_divide) are not extensions.
-  if (supportedExtension(safeName)) return safeName;
+  if (fileExtension(safeName)) return safeName;
 
   if (headers.contentDisposition) {
     const match = /filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i.exec(headers.contentDisposition);
     if (match) {
-      const ext = supportedExtension(decodeURIComponent(match[1].trim()));
+      const ext = fileExtension(decodeURIComponent(match[1].trim()));
       if (ext) return safeName + ext;
     }
   }
