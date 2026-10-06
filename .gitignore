@@ -8,7 +8,6 @@ package-lock.json
 .env
 .env.*
 !.env.example
-!.env.chatgptui.example
 .mcp.json
 *.local
 *.log
@@ -17,8 +16,6 @@ package-lock.json
 files/
 
 # Local agent/workspace state
-# ChatGPT tunnel orchestrator runtime pid
-.chatgptui.pid
 CLAUDE.md
 Agents.md
 .claude/

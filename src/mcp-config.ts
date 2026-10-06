@@ -191,8 +191,6 @@ export async function writeMcpJsonConfig(
 const ALWAYS_STRIPPED_ECLASS_ENV = [
   'ECLASS_SECRET_KEY',
   'OPENAI_API_KEY',
-  'CONTROL_PLANE_API_KEY',
-  'ECLASS_REMOTE_AUTH_TOKEN',
   'ECLASS_TOKEN',
 ] as const;
 

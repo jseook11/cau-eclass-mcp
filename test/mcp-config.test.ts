@@ -71,8 +71,6 @@ test('Hermes config update does not write plaintext password without explicit op
           ECLASS_PASSWORD: 'old-secret',
           ALLOW_PLAINTEXT_ENV_SECRETS: '1',
           ECLASS_SECRET_KEY: 'master-secret',
-          CONTROL_PLANE_API_KEY: 'control-secret',
-          ECLASS_REMOTE_AUTH_TOKEN: 'remote-secret',
         },
       },
     },
@@ -89,8 +87,6 @@ test('Hermes config update does not write plaintext password without explicit op
   assert.equal(config.mcp_servers.eclass.env.ECLASS_PASSWORD, undefined);
   assert.equal(config.mcp_servers.eclass.env.ALLOW_PLAINTEXT_ENV_SECRETS, undefined);
   assert.equal(config.mcp_servers.eclass.env.ECLASS_SECRET_KEY, undefined);
-  assert.equal(config.mcp_servers.eclass.env.CONTROL_PLANE_API_KEY, undefined);
-  assert.equal(config.mcp_servers.eclass.env.ECLASS_REMOTE_AUTH_TOKEN, undefined);
 });
 
 test('doctor resolves credentials from Hermes config', async () => {
@@ -207,8 +203,6 @@ test('existing .mcp.json behavior still writes username and strips plaintext sec
           ECLASS_PASSWORD: 'secret',
           ALLOW_PLAINTEXT_ENV_SECRETS: '1',
           OPENAI_API_KEY: 'openai',
-          CONTROL_PLANE_API_KEY: 'control',
-          ECLASS_REMOTE_AUTH_TOKEN: 'remote',
           ECLASS_SECRET_KEY: 'master',
           ECLASS_OCR_MODEL: 'model',
         },
@@ -226,8 +220,6 @@ test('existing .mcp.json behavior still writes username and strips plaintext sec
   assert.equal(written.mcpServers.eclass.env.ECLASS_PASSWORD, undefined);
   assert.equal(written.mcpServers.eclass.env.ALLOW_PLAINTEXT_ENV_SECRETS, undefined);
   assert.equal(written.mcpServers.eclass.env.OPENAI_API_KEY, undefined);
-  assert.equal(written.mcpServers.eclass.env.CONTROL_PLANE_API_KEY, undefined);
-  assert.equal(written.mcpServers.eclass.env.ECLASS_REMOTE_AUTH_TOKEN, undefined);
   assert.equal(written.mcpServers.eclass.env.ECLASS_SECRET_KEY, undefined);
   assert.equal(written.mcpServers.eclass.env.ECLASS_OCR_MODEL, undefined);
   assert.equal(written.mcpServers.other.command, 'other');
@@ -320,7 +312,6 @@ test('project .mcp.json seeds only a matching legacy eclass entry without modify
         env: {
           ECLASS_USERNAME: 'legacy-user',
           ECLASS_PASSWORD: 'legacy-password',
-          CONTROL_PLANE_API_KEY: 'legacy-control-key',
           KEEP: 'safe',
         },
       },
@@ -343,7 +334,6 @@ test('project .mcp.json seeds only a matching legacy eclass entry without modify
     const written = JSON.parse(await fs.readFile(result.targetPath, 'utf8')) as McpJsonShape;
     assert.equal(written.mcpServers.eclass.env.ECLASS_USERNAME, 'new-user');
     assert.equal(written.mcpServers.eclass.env.ECLASS_PASSWORD, undefined);
-    assert.equal(written.mcpServers.eclass.env.CONTROL_PLANE_API_KEY, undefined);
     assert.equal(written.mcpServers.eclass.env.KEEP, 'safe');
     assert.equal(await fs.readFile(legacyPath, 'utf8'), legacyRaw);
   } finally {

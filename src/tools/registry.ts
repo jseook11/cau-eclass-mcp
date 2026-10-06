@@ -19,8 +19,6 @@ const readOnlyTools = new Set([
   'eclass_list_downloads',
   'eclass_get_download_status',
   'eclass_file_handoff',
-  'search',
-  'fetch',
 ]);
 
 const destructiveTools = new Set([
@@ -30,8 +28,6 @@ const destructiveTools = new Set([
 ]);
 
 function titleFromName(name: string): string {
-  if (name === 'search') return 'Search eclass';
-  if (name === 'fetch') return 'Fetch eclass document';
   return name
     .replace(/^eclass_/, '')
     .split('_')
@@ -58,63 +54,6 @@ function annotationsFor(name: string): ToolAnnotations {
     openWorldHint: false,
   };
 }
-
-export const standardSearchTool: Tool = {
-  name: 'search',
-  title: 'Search eclass',
-  description: '[표준] eclass 강의, 과제, 공지, 자료, 강의계획서, MCP 서버 로컬 다운로드 기록을 통합 검색합니다. ChatGPT/connector 호환용 read-only search 도구입니다. 다운로드 기록은 파일 본문이 아니라 서버 측 file_id/local_path 메타데이터입니다. ChatGPT가 파일 내용을 보려면 fetch 또는 eclass_file_handoff로 공개 /files/<token> URL을 받은 뒤 그 URL을 브라우징으로 직접 열어야 합니다. 공지/자료 본문 스캔은 비용 제어를 위해 검색어가 강의명과 일치하는 일부 강의로 제한됩니다.',
-  annotations: annotationsFor('search'),
-  inputSchema: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: '검색어' },
-    },
-    required: ['query'],
-  },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      results: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            title: { type: 'string' },
-            url: { type: 'string' },
-          },
-          required: ['id', 'title', 'url'],
-        },
-      },
-    },
-    required: ['results'],
-  },
-};
-
-export const standardFetchTool: Tool = {
-  name: 'fetch',
-  title: 'Fetch eclass document',
-  description: '[표준] search 결과의 id를 받아 원문/상세 텍스트를 반환합니다. ChatGPT/connector 호환용 read-only fetch 도구입니다. 다운로드 항목(eclass://download/<file_id>)은 파일 본문을 반환하지 않습니다. HTTP transport에서는 공개 설정된 /files/<token> URL만 반환하며, ChatGPT가 파일을 읽으려면 MCP tool이 아니라 브라우징으로 그 URL을 직접 열어야 합니다. 공개 URL이 아닌 localhost URL이면 MCP 서버 운영자가 ECLASS_HANDOFF_BASE_URL을 공개 HTTPS 주소로 설정해 URL을 다시 발급해야 합니다.',
-  annotations: annotationsFor('fetch'),
-  inputSchema: {
-    type: 'object',
-    properties: {
-      id: { type: 'string', description: 'search 결과의 id' },
-    },
-    required: ['id'],
-  },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      id: { type: 'string' },
-      title: { type: 'string' },
-      text: { type: 'string' },
-      url: { type: 'string' },
-      metadata: { type: 'object' },
-    },
-    required: ['id', 'title', 'text', 'url'],
-  },
-};
 
 type JsonSchema = Record<string, unknown>;
 
@@ -409,7 +348,6 @@ const ECLASS_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       mime_type: str,
       size_bytes: num,
       delivered: bool,
-      download_url: str,
     },
     ['file_id', 'delivered'],
   ),
@@ -420,7 +358,7 @@ export function outputSchemaFor(name: string): Tool['outputSchema'] | undefined 
 }
 
 export function buildToolList(tools: Tool[]): Tool[] {
-  return [...tools, standardSearchTool, standardFetchTool].map((tool) => ({
+  return tools.map((tool) => ({
     ...tool,
     title: tool.title ?? titleFromName(tool.name),
     annotations: tool.annotations ?? annotationsFor(tool.name),

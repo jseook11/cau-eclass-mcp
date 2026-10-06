@@ -14,9 +14,9 @@ import {
 test('managed private files are repaired to 0600', async (t) => {
   if (os.platform() === 'win32') return t.skip('POSIX permission test');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eclass-private-managed-'));
-  const file = path.join(dir, '.env.chatgptui');
+  const file = path.join(dir, '.env.local');
   try {
-    await fs.writeFile(file, 'CONTROL_PLANE_API_KEY=test\n', { mode: 0o644 });
+    await fs.writeFile(file, 'SECRET=test\n', { mode: 0o644 });
     await makeManagedFilePrivate(file, 'managed env');
     assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
   } finally {

@@ -7,7 +7,7 @@ skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 �
 ## 공통 사항
 
 - 모든 툴은 기존 클라이언트 호환을 위해 JSON 문자열을 `content[0].text`로 반환한다.
-  ChatGPT/remote MCP 호환을 위해 가능한 경우 같은 값을 `structuredContent`에도 함께 싣는다.
+  가능한 경우 같은 값을 `structuredContent`에도 함께 싣는다.
   배열 결과는 `structuredContent.result`로 감싼다.
 - 모든 노출 툴은 `tools/list`에서 `outputSchema`(JSON Schema, 항상 `type: "object"`)를 함께 내보낸다
   (`src/tools/registry.ts`의 `ECLASS_OUTPUT_SCHEMAS`, `buildToolList`가 주입). 아래 각 툴의 "출력"
@@ -19,7 +19,7 @@ skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 �
     존재하는 최소 필드만). partial success·optional 필드·`{ ok: false, error_code, ... }` 실패 응답이
     같은 스키마로 통과한다.
 - 툴 description은 `[로컬]`/`[네트워크]` 접두사로 비용을 표시한다. `[로컬]`은 로컬 DB/캐시만 사용해 즉시 반환, `[네트워크]`는 Canvas API 호출이며 첫 호출 시 자동 로그인이 끼어들 수 있다. 같은 정보를 얻을 수 있다면 `[로컬]` 도구를 우선한다.
-- 인증은 서버가 알아서 처리한다 (Keychain 토큰 캐시 → 만료 시 HTTP SSO 자동 로그인). 호출 측에서 신경 쓸 것 없음.
+- 인증은 서버가 처리한다 (Keychain 토큰 캐시 → 만료 시 HTTP SSO 자동 로그인). 호출 측에서 토큰을 다룰 필요는 없다.
   - 서버 측에서 토큰이 만료/회수되어 401이 돌아오면 캐시 토큰을 폐기하고 자동 재로그인 후 해당 요청을 1회 재시도한다.
 - 모든 HTTP 요청에 타임아웃이 걸려 있다 (API 30초, 파일 다운로드 5분, 동영상 다운로드 30분). eclass가 응답을 멈춰도 툴이 무한 대기하지 않는다.
 - `course_id`는 숫자. Canvas가 문자열 ID를 반환해도 서버가 양의 안전 정수로 정규화한 뒤
@@ -39,33 +39,6 @@ skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 �
    네트워크 목록을 조회한다. 이 보조 조회는 현재 학기 캐시를 덮어쓰지 않는다.
 
 ## 툴 목록
-
-### search
-
-ChatGPT Company Knowledge / connector-like 호환용 표준 검색 도구. eclass 강의, 과제,
-공지, 자료, 강의계획서 후보, 로컬 다운로드 기록을 best-effort로 통합 검색한다.
-
-- 입력: `{ query: string }`
-- 출력: `{ results: [{ id, title, url }] }`
-- `id`는 `fetch`에 넘기는 canonical id다. 예:
-  - `eclass://course/<course_id>`
-  - `eclass://assignment/<course_id>/<assignment_id>`
-  - `eclass://announcement/<course_id>/<announcement_id>`
-  - `eclass://material/<course_id>/<material_id>`
-  - `eclass://syllabus/<year>/<term>/<course_code>/<section>?campcd=...&sust=...`
-  - `eclass://download/<file_id>`
-- 검색 중 일부 source가 실패해도 가능한 결과를 반환한다.
-- 응답 지연을 막기 위해 전체 검색은 제한된 시간 예산 안에서 best-effort로 동작한다.
-  공지/자료 본문 스캔은 검색어가 강의명과 일치하는 일부 강의로 제한된다.
-
-### fetch
-
-`search` 결과의 canonical id를 받아 상세 텍스트를 반환하는 표준 조회 도구.
-
-- 입력: `{ id: string }`
-- 출력: `{ id, title, text, url, metadata? }`
-- `text`는 해당 항목의 구조화 JSON을 사람이 읽을 수 있게 pretty-print한 문자열이다.
-- **`eclass://download/<file_id>`** 항목은 특별 취급한다. HTTP transport에서는 파일 본문을 반환하지 않고 `text`/`url`/`metadata.download_url`에 **파일 URL**(`/files/<token>`)만 담아 반환한다. ChatGPT가 브라우징으로 이 URL을 직접 열어 읽게 하려면 `/files` 경로가 공개 인터넷에서 도달 가능해야 하며, localhost/127.0.0.1 링크는 같은 머신의 사용자 브라우저 전용이다. 공개 handoff가 필요하면 `ECLASS_HANDOFF_BASE_URL`을 공개 HTTPS reverse proxy/터널 주소로 설정한 뒤 URL을 다시 발급한다(서버는 MCP `resources` 기능을 노출하지 않으므로 ChatGPT가 `read_resource`로 파일을 읽으려 하면 실패한다 — 링크 경로가 정상 경로다). stdio에서는 메타데이터 JSON(`local_path` 포함)을 반환한다.
 
 ### eclass_get_courses
 
@@ -270,7 +243,7 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - `source`: 자료 출처(modules/files/courseresource 등). **source가 기록된 레코드만** 매칭됨 (구버전 다운로드 기록은 source가 null).
   - 날짜 범위는 ISO 문자열, 양끝 포함. 파싱 불가한 값은 무시.
 - 출력: `{ matches: [DownloadRecord + { course_name, extension }], total_matched, limit, handoff_note }` — 최신순 정렬, limit 적용 전 총 개수는 `total_matched`.
-- ChatGPT가 파일 내용을 봐야 하면 `matches[].file_id`로 `eclass_file_handoff`를 호출해 공개 `/files/<token>` URL을 별도 발급하고, 그 URL을 브라우징으로 직접 연다.
+- 파일 본문이 필요하면 `matches[].file_id`로 `eclass_file_handoff`를 호출한다.
 
 ### eclass_export_course_snapshot
 
@@ -293,7 +266,7 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
 
 ### eclass_get_materials
 
-강의 자료 목록/메타데이터 조회. 여러 source를 병렬 수집하며 일부 실패해도 성공분은 반환 (partial success). 파일 본문을 다운로드하거나 ChatGPT에 첨부하지 않는다.
+강의 자료 목록/메타데이터 조회. 여러 source를 병렬 수집하며 일부 실패해도 성공분은 반환 (partial success). 파일 본문을 다운로드하거나 도구 결과에 첨부하지 않는다.
 
 - 입력: `{ course_id: number, sources?: ('modules'|'files'|'courseresource'|'external'|'modulebuilder'|'announcements')[], resolve_external?: boolean = false }`
   - 자료는 `modulebuilder`(주차학습), `courseresource`(강의자료실), `announcements`(공지 첨부),
@@ -323,11 +296,11 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - `is_downloaded: true`면 이미 로컬에 있음 (`local_path` 참조) — 재다운로드 불필요.
   - ModuleBuilder가 `lecture_period_status: "not_open"` 또는 `content_id: "not_open"`을 반환하는 항목은 자료 목록에서 제외한다. `not_open` placeholder를 OCS URL로 반환하지 않으며, 해당 항목만 있다면 빈 성공 목록으로 반환한다.
 - `ok: false`는 모든 source 실패. `errors[].retryable`이 true면 재시도 가치 있음.
-- 파일 본문이 필요하면 `eclass_download_file`/`eclass_download_materials_batch`로 MCP 서버 로컬 캐시에 받은 뒤, `eclass_file_handoff`로 공개 URL을 별도 발급한다.
+- 파일 본문이 필요하면 `eclass_download_file`/`eclass_download_materials_batch`로 MCP 서버 로컬 캐시에 받은 뒤, `eclass_file_handoff`로 파일 본문을 받는다.
 
 ### eclass_download_file
 
-파일 1개를 MCP 서버 로컬 디스크/캐시에 다운로드. `eclass_get_materials` 결과 중 `downloadable: true`이고 `acquisition_policy: download`인 항목을 넘긴다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않는다.
+파일 1개를 MCP 서버 로컬 디스크/캐시에 다운로드. `eclass_get_materials` 결과 중 `downloadable: true`이고 `acquisition_policy: download`인 항목을 넘긴다. 이 도구는 파일 본문을 도구 결과로 전달하지 않는다.
 
 - 입력: `{ file_id: string, course_id: number, url: string | null, display_name: string, type?: string, requires_launch?: boolean }`
   - `asset_kind`, `downloadable`, `acquisition_policy`, `resolution_reason`, `source`, `module_name`, `external_url`, `locked_for_user`, `unlock_at`도 전달할 수 있다. `id → file_id`, `title → display_name`을 매핑한다.
@@ -339,11 +312,11 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - `excluded_video`, `excluded_interactive`, `not_downloadable`, `needs_resolution`, `not_open`은 정상 비파일 결과이며 local_path가 없다. `EXTERNAL_TOOL_NO_ARTIFACT`는 `needs_resolution`, `retryable: false`로 반환한다. 실제 `failed`는 `failure_kind`로 재시도/terminal을 구분한다.
 - 새 파일 저장 위치: `~/Downloads/eclass/{course_id}/{source_id_hash}/` (env `ECLASS_DOWNLOAD_DIR`로 변경 가능). 다른 ID의 같은 파일명을 덮어쓰지 않는다. 기존 경로의 캐시도 계속 조회한다.
 - 내부적으로 url/type에 따라 DownloadStrategy를 결정한다 (아래 "다운로드 전략" 참조).
-- ChatGPT가 파일 내용을 읽어야 하면 반환된 `file_id`로 `eclass_file_handoff`를 호출해 공개 `/files/<token>` URL을 별도 발급하고, 그 URL을 브라우징으로 직접 연다.
+- 파일 본문이 필요하면 반환된 `file_id`로 `eclass_file_handoff`를 호출한다.
 
 ### eclass_download_materials_batch
 
-여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드. **부분 성공** 지원 — 일부 실패해도 나머지는 계속 진행한다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않는다. 동영상은 제외하고 `eclass_download_video`로 별도 처리한다.
+여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드. **부분 성공** 지원 — 일부 실패해도 나머지는 계속 진행한다. 이 도구는 파일 본문을 도구 결과로 전달하지 않는다. 동영상은 제외하고 `eclass_download_video`로 별도 처리한다.
 
   - 입력: `{ course_id: number, materials: [{ file_id, url?, display_name, type?, source?, requires_launch? }], continue_on_error?: boolean = true }`
   - `continue_on_error: false`면 첫 실패에서 중단.
@@ -353,11 +326,11 @@ MCP 서버 로컬 캐시에 다운로드된 파일 기록 검색. **네트워크
   - DownloadOutcome: `{ file_id, display_name, status: 'downloaded'|'skipped'|'failed'|'excluded_video'|'excluded_interactive'|'not_downloadable'|'needs_resolution'|'not_open', strategy, local_path?, size_bytes?, error_code?, message?, retryable?, next_action?, failure_kind? }`
   - `ok: false`는 실패 항목이 하나라도 있음을 의미.
 - `source`를 넘기면 캐시 DB에 기록되어 이후 `eclass_search_downloads`의 source 필터로 검색 가능.
-- ChatGPT가 파일 내용을 읽어야 하면 각 `results[].file_id`로 `eclass_file_handoff`를 호출해 공개 `/files/<token>` URL을 별도 발급하고, 그 URL을 브라우징으로 직접 연다.
+- 파일 본문이 필요하면 각 `results[].file_id`로 `eclass_file_handoff`를 호출한다.
 
 ### eclass_download_video
 
-OCS UniPlayer MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드한다. 기존 파일 다운로드 도구와 분리된 동영상 전용 툴이다. 이 도구는 ChatGPT에 동영상 바이트를 전달하지 않는다.
+OCS UniPlayer MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드한다. 기존 파일 다운로드 도구와 분리된 동영상 전용 툴이다. 이 도구는 동영상 바이트를 도구 결과로 전달하지 않는다.
 
 - 입력: `{ video_id: string, course_id: number, url: string, display_name: string, type?: string, source?: string }`
   - `video_id`: material id 또는 동영상 식별자. 캐시에는 파일 기록과의 충돌을 막기 위해 `video:<video_id>` 키로 저장된다 (`eclass_list_downloads`/`eclass_remove_download`에서 이 키로 보인다).
@@ -376,7 +349,7 @@ OCS UniPlayer MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 
   - OCS 메타데이터에서 검증 가능한 직접 MP4 주소를 제공하는 콘텐츠를 받는다. 이 도구는 재생·진도·출석 이벤트 API를 호출하지 않는다.
   - 메타데이터가 직접 MP4를 제공하지 않으면 `VIDEO_DOWNLOAD_UNSUPPORTED`로 실제 검증 실패 사유를 반환한다. 이 코드는 DRM 또는 진도추적 여부를 추정하지 않는다.
   - 비디오가 아닌 파일 자료는 `eclass_download_file` 또는 `eclass_download_materials_batch`를 사용한다.
-- 외부에서 동영상 파일을 받아야 하면 `file_id="video:<video_id>"`로 `eclass_file_handoff`를 호출해 공개 URL을 별도 발급한다.
+- 파일 본문이 필요하면 `file_id="video:<video_id>"`로 `eclass_file_handoff`를 호출한다.
 
 ### eclass_list_downloads
 
@@ -384,7 +357,7 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 
 - 입력: `{ course_id?: number }`
 - 출력: `[{ file_id, course_id, display_name, local_path, downloaded_at, size_bytes }]`
-- ChatGPT가 파일 내용을 봐야 하면 `file_id`로 `eclass_file_handoff`를 호출해 공개 URL을 별도 발급한다.
+- 파일 본문이 필요하면 `file_id`로 `eclass_file_handoff`를 호출한다.
 
 ### eclass_get_download_status
 
@@ -402,17 +375,15 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 
 ### eclass_file_handoff
 
-다운로드된 파일을 클라이언트에 전달한다. **두 가지 모드**가 있으며 transport에 따라 자동 선택된다.
+다운로드된 파일 본문을 MCP embedded resource로 전달한다.
 
-- **URL 모드 (HTTP transport, ChatGPT 커넥터)**: base64를 컨텍스트에 싣지 않고 **파일 URL만 텍스트로** 반환한다. URL은 HTTP 서버의 `GET /files/<token>` 엔드포인트를 가리키며, 브라우저가 인라인으로 열 수 있도록 `Content-Disposition: inline`으로 스트리밍한다. 이 응답은 파일 첨부가 아니므로 호출자는 파일을 가진 것이 아니다. 같은 머신의 브라우저가 localhost로 직접 받을 수 있고, ChatGPT 브라우징이 직접 열어 읽게 하려면 공개 인터넷에서 도달 가능한 `ECLASS_HANDOFF_BASE_URL`을 지정해야 한다(터널은 `/mcp`만 포워딩하므로 `/files`는 별도로 공개되어야 함). 토큰은 1회 발급되는 불투명 값으로 그 자체가 자격증명이며 일정 시간 후 만료된다. 큰 파일도 메모리/컨텍스트에 올리지 않는다.
-- **blob 모드 (stdio transport, 로컬)**: 파일 바이트를 MCP embedded resource blob(base64)으로 반환한다. ⚠️ base64가 응답 본문(=대화 컨텍스트)에 그대로 포함되므로 큰 파일은 컨텍스트를 빠르게 소모한다.
+- 파일 바이트를 MCP embedded resource blob(base64)으로 반환한다. ⚠️ base64가 응답 본문(=대화 컨텍스트)에 그대로 포함되므로 큰 파일은 컨텍스트를 빠르게 소모한다.
 
 - 입력: `{ file_id: string }`
   - `file_id`: `eclass_search_downloads`/`eclass_list_downloads`가 반환하는 file_id. 영상은 `video:<id>`.
-- 출력(성공, URL 모드): `structuredContent = { file_id, display_name, mime_type, size_bytes, delivered: true, download_url }` + `content[0] = { type: "text", text: "...링크..." }`
-- 출력(성공, blob 모드): `structuredContent = { file_id, display_name, mime_type, size_bytes, delivered: true }` + `content[0] = { type: "resource", resource: { uri: "file:///<파일명>", mimeType, blob } }`
+- 출력(성공): `structuredContent = { file_id, display_name, mime_type, size_bytes, delivered: true }` + `content[0] = { type: "resource", resource: { uri: "file:///<파일명>", mimeType, blob } }`
 - 출력(실패, `isError`): `not_found`(file_id 없음) / `file_missing`(레코드는 있으나 디스크 파일 없음) / `too_large`(`ECLASS_HANDOFF_MAX_BYTES` 초과, 기본 25MB)
-- 청킹 미지원 — 한계 초과 파일은 거절한다(URL 모드는 한계 검사만 하고 바이트는 안 읽는다).
+- 청킹 미지원 — 한계 초과 파일은 거절한다.
 
 ## 다운로드 전략 (DownloadStrategy)
 
@@ -449,14 +420,10 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 | `ECLASS_USERNAME` | (필수) | eclass 로그인 ID |
 | `ECLASS_DOWNLOAD_DIR` | `~/Downloads/eclass` | 다운로드 저장 위치 |
 | `ECLASS_DB_PATH` | `~/.eclass-mcp/files.db` | 다운로드/강의 캐시 DB |
-| `ECLASS_HANDOFF_MAX_BYTES` | `26214400` | `eclass_file_handoff`가 URL handoff를 허용할 파일의 최대 크기(바이트). 기본 25MB |
-| `ECLASS_HANDOFF_BASE_URL` | `http://127.0.0.1:<port>` | URL 모드(HTTP transport) handoff 링크의 base. 헤드리스/원격 호스트에서 사용자가 도달 가능한 주소로 덮어쓴다 |
+| `ECLASS_HANDOFF_MAX_BYTES` | `26214400` | `eclass_file_handoff`가 본문을 반환할 파일의 최대 크기(바이트). 기본 25MB |
 | `ECLASS_CREDENTIAL_BACKEND` | auto | `encrypted` / `keytar` 강제, `file`은 legacy read-only. auto는 encrypted → keytar 순서이며 둘 다 없으면 실패 |
 | `ECLASS_SECRET_KEY` | (없음) | 암호화 백엔드 마스터 키(32바이트 base64). 헤드리스 서버 실행 시 주입 |
 | `ECLASS_SECRET_KEY_FILE` | (없음) | 마스터 키 파일 경로(raw 32바이트 또는 base64 텍스트) |
 | `ECLASS_ENC_STORE_PATH` | `~/.eclass-mcp/secrets.enc` | 암호화 비밀번호 파일 경로 |
 | `ALLOW_PLAINTEXT_ENV_SECRETS` | 꺼짐 | `1`일 때만 `ECLASS_PASSWORD` env 허용. Canvas token/session용 keytar/encrypted backend는 별도 필수 |
-| `CONTROL_PLANE_API_KEY` | — | OpenAI tunnel 런타임 API 키 (Tunnels Read+Use). `pnpm run chatgptui`에서 사용 |
-| `CONTROL_PLANE_TUNNEL_ID` | — | tunnel 식별자 (Platform Tunnels 발급) |
-| `ECLASS_TUNNEL_PROFILE_FILE` | `${XDG_CONFIG_HOME:-~/.config}/tunnel-client/eclass-mcp.yaml` | tunnel-client 프로파일 경로 오버라이드 |
 | `DEBUG` | 꺼짐 | `1`이면 stderr 디버그 로그 |

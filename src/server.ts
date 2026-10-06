@@ -19,8 +19,7 @@ import { getDownloadStatus } from './tools/get-download-status.js';
 import { getAssignmentDetail } from './tools/get-assignment-detail.js';
 import { getGrades } from './tools/get-grades.js';
 import { searchDownloads } from './tools/search-downloads.js';
-import { handoffFile, inferMimeType, resolveHandoffMaxBytes } from './tools/file-handoff.js';
-import { registerHandoff } from './file-handoff-registry.js';
+import { handoffFile, resolveHandoffMaxBytes } from './tools/file-handoff.js';
 import { exportCourseSnapshot } from './tools/export-snapshot.js';
 import { submitAssignment } from './tools/submit-assignment.js';
 import { downloadOne } from './tools/download.js';
@@ -35,10 +34,9 @@ import { searchSyllabusList, getSyllabus } from './mportal-client.js';
 import { runDoctor } from './doctor.js';
 import { sanitizeDebug } from './errors.js';
 import { buildToolList, normalizeToolResult } from './tools/registry.js';
-import { fetchEclassDocument, searchEclassDocuments } from './tools/standard-search.js';
 
 const LOCAL_FILE_HANDOFF_NOTE =
-  '다운로드/조회 결과의 파일은 MCP 서버 로컬 캐시에만 있습니다. ChatGPT가 파일 내용을 보려면 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 별도 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다.';
+  '다운로드/조회 결과의 파일은 MCP 서버 로컬 캐시에 있습니다. 파일 본문이 필요하면 file_id로 eclass_file_handoff를 호출하세요.';
 
 // --- Server factory ---
 export type EclassServerContext = {
@@ -46,12 +44,9 @@ export type EclassServerContext = {
   session: BrowserSession;
   fileCache: FileCache;
   examCache: ExamCache;
-  // When set (HTTP transport), eclass_file_handoff returns a download URL under
-  // this base instead of an inline base64 blob, keeping files out of context.
-  handoffBaseUrl?: string;
 };
 
-export function createEclassServer({ username, session, fileCache, examCache, handoffBaseUrl }: EclassServerContext): Server {
+export function createEclassServer({ username, session, fileCache, examCache }: EclassServerContext): Server {
   const server = new Server(
     { name: "eclass-mcp", version: "0.1.0" },
     {
@@ -406,7 +401,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_search_downloads',
-        description: '[로컬] MCP 서버 로컬 캐시에 다운로드된 파일 기록만 필터 검색합니다 (파일명/강의명/확장자/source/다운로드 날짜 범위). 이 도구는 파일 본문을 반환하지 않습니다. ChatGPT가 파일을 보려면 검색된 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. 전체 나열은 eclass_list_downloads, 강의별 요약은 eclass_get_download_status를 사용하세요.',
+        description: '[로컬] MCP 서버 로컬 캐시에 다운로드된 파일 기록만 필터 검색합니다 (파일명/강의명/확장자/source/다운로드 날짜 범위). 이 도구는 파일 본문을 반환하지 않습니다. 파일 본문이 필요하면 검색된 file_id로 eclass_file_handoff를 호출하세요. 전체 나열은 eclass_list_downloads, 강의별 요약은 eclass_get_download_status를 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -449,7 +444,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_get_materials',
-        description: '[네트워크] 강의 자료 목록/메타데이터를 가져옵니다 (모듈, 파일함, 강의자료실, 외부도구). 강의자료는 주차학습(modulebuilder), LearningX 강의자료실(courseresource), 공지 첨부(announcements), Canvas 모듈/외부 링크(modules/external)에 분산될 수 있으므로 한 source에서 자료를 찾았어도 다른 source를 생략하지 말고 결과를 합쳐 확인합니다. 같은 자료가 여러 source에서 발견되면 하나로 합치고 대표 source와 모든 출처 sources를 반환합니다. 제목만 같은 서로 다른 항목은 합치지 않습니다. 권장 1차 조회는 modulebuilder, courseresource, announcements, modules, external이며, Canvas 기본 파일함(files)은 Files 탭이 노출되거나 사용자가 명시적으로 요청한 경우에만 마지막으로 조회합니다. 중앙대 학생 계정에서 files 401은 권한 거부일 수 있으므로 토큰 만료로 보고 재로그인하지 않습니다. modulebuilder의 not_open placeholder URL은 제외합니다. Canvas 잠금 항목은 acquisition_policy=not_open으로 반환합니다. 모든 항목에 asset_kind/downloadable/acquisition_policy/resolution_reason/fingerprint를 반환하며 downloadable=true와 acquisition_policy=download인 항목만 파일 도구에 전달합니다. ExternalTool은 모듈명으로 분류하지 않으며 resolve_external=true이면 미확인 래퍼를 LTI로 추가 확인합니다. 이 도구는 파일 본문을 다운로드하거나 ChatGPT에 첨부하지 않습니다. 파일은 eclass_download_file/eclass_download_materials_batch로 MCP 서버 로컬 캐시에 받은 뒤, ChatGPT가 읽어야 하면 eclass_file_handoff로 공개 /files/<token> URL을 별도 발급해야 합니다. 반환값은 { ok, course_id, sources, materials, errors, warnings } JSON 객체이며, 일부 source 실패 시 성공한 자료와 실패 정보를 함께 반환합니다.',
+        description: '[네트워크] 강의 자료 목록/메타데이터를 가져옵니다 (모듈, 파일함, 강의자료실, 외부도구). 강의자료는 주차학습(modulebuilder), LearningX 강의자료실(courseresource), 공지 첨부(announcements), Canvas 모듈/외부 링크(modules/external)에 분산될 수 있으므로 한 source에서 자료를 찾았어도 다른 source를 생략하지 말고 결과를 합쳐 확인합니다. 같은 자료가 여러 source에서 발견되면 하나로 합치고 대표 source와 모든 출처 sources를 반환합니다. 제목만 같은 서로 다른 항목은 합치지 않습니다. 권장 1차 조회는 modulebuilder, courseresource, announcements, modules, external이며, Canvas 기본 파일함(files)은 Files 탭이 노출되거나 사용자가 명시적으로 요청한 경우에만 마지막으로 조회합니다. 중앙대 학생 계정에서 files 401은 권한 거부일 수 있으므로 토큰 만료로 보고 재로그인하지 않습니다. modulebuilder의 not_open placeholder URL은 제외합니다. Canvas 잠금 항목은 acquisition_policy=not_open으로 반환합니다. 모든 항목에 asset_kind/downloadable/acquisition_policy/resolution_reason/fingerprint를 반환하며 downloadable=true와 acquisition_policy=download인 항목만 파일 도구에 전달합니다. ExternalTool은 모듈명으로 분류하지 않으며 resolve_external=true이면 미확인 래퍼를 LTI로 추가 확인합니다. 이 도구는 파일 본문을 다운로드하거나 도구 결과에 첨부하지 않습니다. 파일은 eclass_download_file/eclass_download_materials_batch로 MCP 서버 로컬 캐시에 받은 뒤, 파일 본문이 필요하면 eclass_file_handoff를 호출하세요. 반환값은 { ok, course_id, sources, materials, errors, warnings } JSON 객체이며, 일부 source 실패 시 성공한 자료와 실패 정보를 함께 반환합니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -467,7 +462,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_download_file',
-        description: '[네트워크] 강의 파일을 MCP 서버 로컬 디스크/캐시에 다운로드합니다. 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 local_path/file_id 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 반환된 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. 과목과 원본 ID가 일치하는 캐시 파일은 건너뜁니다. acquisition_policy/downloadable을 함께 전달하세요. 동영상/interactive/미확인/잠김은 정상 제외 상태로 반환하며 실제 실패만 isError=true와 JSON error_code/retryable을 반환합니다. 동영상은 eclass_download_video를 사용하세요.',
+        description: '[네트워크] 강의 파일을 MCP 서버 로컬 디스크/캐시에 다운로드합니다. 이 도구는 파일 본문을 도구 결과로 전달하지 않고 local_path/file_id 같은 서버 측 기록만 반환합니다. 파일 본문이 필요하면 반환된 file_id로 eclass_file_handoff를 호출하세요. 과목과 원본 ID가 일치하는 캐시 파일은 건너뜁니다. acquisition_policy/downloadable을 함께 전달하세요. 동영상/interactive/미확인/잠김은 정상 제외 상태로 반환하며 실제 실패만 isError=true와 JSON error_code/retryable을 반환합니다. 동영상은 eclass_download_video를 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -492,7 +487,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_download_materials_batch',
-        description: '[네트워크] 여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드합니다 (부분 성공 지원). 이 도구는 ChatGPT에 파일 본문을 전달하지 않고 file_id/local_path 같은 서버 측 기록만 반환합니다. ChatGPT가 파일을 읽어야 하면 각 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 발급하고, 그 URL을 브라우징으로 직접 열어야 합니다. eclass_get_materials의 id/title을 file_id/display_name으로 매핑하고 분류·source·잠금 필드를 함께 전달하세요. 동영상 자료는 eclass_download_video로 별도 처리합니다.',
+        description: '[네트워크] 여러 파일 자료를 MCP 서버 로컬 디스크/캐시에 한 번에 다운로드합니다 (부분 성공 지원). 이 도구는 파일 본문을 도구 결과로 전달하지 않고 file_id/local_path 같은 서버 측 기록만 반환합니다. 파일 본문이 필요하면 각 file_id로 eclass_file_handoff를 호출하세요. eclass_get_materials의 id/title을 file_id/display_name으로 매핑하고 분류·source·잠금 필드를 함께 전달하세요. 동영상 자료는 eclass_download_video로 별도 처리합니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -529,7 +524,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_download_video',
-        description: '[네트워크] OCS 메타데이터에서 확인한 직접 MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드합니다 (제한시간 30분). 이 도구는 재생·진도·출석 API를 호출하지 않고 동영상 바이트도 ChatGPT에 전달하지 않습니다. 외부에서 받아야 하면 file_id="video:<video_id>"로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 별도 발급해야 합니다. 캐시에는 file_id="video:<video_id>"로 기록되므로 재다운로드 시 eclass_remove_download에 이 형식을 사용하세요.',
+        description: '[네트워크] OCS 메타데이터에서 확인한 직접 MP4 동영상을 검증 후 MCP 서버 로컬 디스크/캐시에 다운로드합니다 (제한시간 30분). 이 도구는 재생·진도·출석 API를 호출하지 않고 동영상 바이트도 도구 결과로 전달하지 않습니다. 파일 본문이 필요하면 file_id="video:<video_id>"로 eclass_file_handoff를 호출하세요. 캐시에는 file_id="video:<video_id>"로 기록되므로 재다운로드 시 eclass_remove_download에 이 형식을 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -545,7 +540,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_list_downloads',
-        description: '[로컬] MCP 서버 로컬 캐시에 저장된 다운로드 기록 전체를 나열합니다. 이 도구는 파일 본문을 반환하지 않습니다. ChatGPT가 파일을 읽어야 하면 file_id로 eclass_file_handoff를 호출해 공개 /files/<token> URL을 별도 발급해야 합니다. 조건 검색은 eclass_search_downloads, 강의별 요약은 eclass_get_download_status를 사용하세요.',
+        description: '[로컬] MCP 서버 로컬 캐시에 저장된 다운로드 기록 전체를 나열합니다. 이 도구는 파일 본문을 반환하지 않습니다. 파일 본문이 필요하면 file_id로 eclass_file_handoff를 호출하세요. 조건 검색은 eclass_search_downloads, 강의별 요약은 eclass_get_download_status를 사용하세요.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -555,7 +550,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_get_download_status',
-        description: '[로컬] MCP 서버 로컬 캐시의 다운로드 현황을 강의별로 요약 조회합니다. 이 도구는 파일 본문을 반환하지 않습니다. 파일 내용을 보려면 eclass_search_downloads/eclass_list_downloads로 file_id를 찾고 eclass_file_handoff로 공개 URL을 별도 발급해야 합니다. 강의명은 로컬 course cache를 사용합니다.',
+        description: '[로컬] MCP 서버 로컬 캐시의 다운로드 현황을 강의별로 요약 조회합니다. 이 도구는 파일 본문을 반환하지 않습니다. 파일 본문이 필요하면 eclass_search_downloads/eclass_list_downloads로 file_id를 찾고 eclass_file_handoff를 호출하세요. 강의명은 로컬 course cache를 사용합니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -576,11 +571,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_file_handoff',
-        description: '[로컬/URL] 다운로드된 파일 본문을 tool 응답에 첨부하지 않고 /files/<token> URL만 발급합니다. ChatGPT가 직접 파일을 읽으려면 반환 URL이 공개 인터넷에서 접근 가능해야 하며, localhost/127.0.0.1 URL은 같은 머신의 사용자 브라우저 전용입니다. 공개 handoff가 필요하면 ECLASS_HANDOFF_BASE_URL을 공개 HTTPS reverse proxy/터널 주소로 설정한 뒤 다시 호출하세요. file_id는 eclass_search_downloads/eclass_list_downloads에서 얻습니다. 25MB 초과 파일은 거절됩니다(ECLASS_HANDOFF_MAX_BYTES로 조정).',
+        description: '[로컬] 다운로드된 파일 본문을 MCP embedded resource(base64)로 반환합니다. file_id는 eclass_search_downloads/eclass_list_downloads에서 얻습니다. 25MB 초과 파일은 거절됩니다(ECLASS_HANDOFF_MAX_BYTES로 조정).',
         inputSchema: {
           type: 'object',
           properties: {
-            file_id: { type: 'string', description: 'URL을 발급할 로컬 다운로드 파일의 file_id (eclass_search_downloads 결과). 영상은 "video:<id>" 형식.' },
+            file_id: { type: 'string', description: '본문을 반환할 로컬 다운로드 파일의 file_id (eclass_search_downloads 결과). 영상은 "video:<id>" 형식.' },
           },
           required: ['file_id'],
         },
@@ -907,34 +902,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
           readFile: (p) => fs.readFileSync(p),
           maxBytes: resolveHandoffMaxBytes(process.env),
-          registerUrl: handoffBaseUrl
-            ? (record, sizeBytes) => {
-                const token = registerHandoff({
-                  localPath: record.local_path,
-                  displayName: record.display_name,
-                  mimeType: inferMimeType(record.display_name),
-                  sizeBytes,
-                });
-                return `${handoffBaseUrl.replace(/\/$/, '')}/files/${token}`;
-              }
-            : undefined,
         });
         if (!outcome.ok) {
           return { isError: true, content: [{ type: 'text', text: JSON.stringify(outcome.error) }] };
         }
         return outcome.result as unknown as Parameters<typeof normalizeToolResult>[0];
-      }
-
-      case 'search': {
-        const parsed = z.object({ query: z.string().min(1) }).parse(args ?? {});
-        const response = await searchEclassDocuments({ session, fileCache, examCache, handoffBaseUrl }, parsed.query);
-        return { content: [{ type: 'text', text: JSON.stringify(response) }] };
-      }
-
-      case 'fetch': {
-        const parsed = z.object({ id: z.string().min(1) }).parse(args ?? {});
-        const response = await fetchEclassDocument({ session, fileCache, examCache, handoffBaseUrl }, parsed.id);
-        return { content: [{ type: 'text', text: JSON.stringify(response) }] };
       }
 
       default:

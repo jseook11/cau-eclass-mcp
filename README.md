@@ -5,13 +5,11 @@
 [![MCP](https://img.shields.io/badge/MCP-server-6E40C9)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#개발)
 
-> **중앙대학교 eclass를 자연어로.** 시험 일정부터 과제 제출까지, LMS 작업을 Claude·Codex 같은 MCP 클라이언트의 도구로 노출하는 서버입니다.
-
-중앙대 eclass(LearningX / Canvas LMS)를 다루는 **MCP 서버**입니다. 강의·과제·성적 조회,
-자료/동영상 다운로드, 과제 제출, 중간·기말시험 시간표 조회, 강의계획서(syllabus) 검색·조회를
-하나의 도구 세트로 제공합니다. 인증(secure backend 토큰 캐시 → 만료 시 HTTP SSO 로그인),
-타임아웃·재시도, 부분 실패 처리는 서버가 알아서 흡수하므로 클라이언트는 자연어 요청만
-던지면 됩니다.
+중앙대학교 eclass(LearningX / Canvas LMS)를 다루는 **MCP 서버**입니다. Claude·Codex 같은 MCP
+클라이언트에서 강의·과제·성적 조회, 자료/동영상 다운로드, 과제 제출, 중간·기말시험 시간표 조회,
+강의계획서(syllabus) 검색·조회를 하나의 도구 세트로 제공합니다. 인증(토큰 캐시 → 만료 시
+HTTP SSO 로그인), 타임아웃·재시도, 부분 실패 처리는 서버가 담당하므로 클라이언트는 도구만
+호출하면 됩니다.
 
 > [!WARNING]
 > 개인 학습·편의용 **비공식** 도구입니다. **본인 계정으로 본인의 학습 데이터에만** 사용하세요.
@@ -25,7 +23,6 @@
 - [요구 사항](#요구-사항)
 - [빠른 시작](#빠른-시작)
 - [헤드리스 서버: 암호화 백엔드](#헤드리스-서버-암호화-백엔드)
-- [ChatGPT 연결](#chatgpt-연결)
 - [사용 예시](#사용-예시)
 - [보안](#보안)
 - [환경 변수](#환경-변수)
@@ -60,17 +57,17 @@ MCP 클라이언트에서 자연어로 요청하면 서버가 필요한 도구�
     평가비율: 출결 10 / 중간 45 / 기말 45.
 ```
 
-> 위 대화는 동작을 보여주기 위한 예시입니다(값은 임의).
+> 예시이며 값은 임의입니다.
 
 ## 주요 기능
 
-| 영역 | 할 수 있는 것 | 핵심 도구 |
+| 영역 | 할 수 있는 것 | 주요 도구 |
 |---|---|---|
 | 강의 | 이번 학기 교과목 조회(로컬 스냅샷 우선), 이전 학기·예방교육 분리 조회 | `eclass_get_courses`, `eclass_get_courses_cached` |
 | 과제 | 마감 임박 과제·퀴즈 조회, 상세(제출 유형/확장자/마감) 확인 | `eclass_get_assignments`, `eclass_get_assignment_detail` |
 | 과제 제출 | 파일/텍스트 제출 (기본 `dry_run`, 이중 제출 방지 검증) | `eclass_submit_assignment` |
 | 성적 | 강의 단위 + 과제별 점수 | `eclass_get_grades` |
-| 자료 | 강의 자료 목록 수집, MCP 서버 로컬 다운로드, 공개 URL handoff 별도 발급 | `eclass_get_materials`, `eclass_download_materials_batch`, `eclass_file_handoff` |
+| 자료 | 강의 자료 목록 수집, MCP 서버 로컬 다운로드, 로컬 캐시 파일 전달 | `eclass_get_materials`, `eclass_download_materials_batch`, `eclass_file_handoff` |
 | 동영상 | OCS UniPlayer MP4 동영상을 MCP 서버 로컬에 다운로드 | `eclass_download_video` |
 | 시험 시간표 | 중간·기말시험 공지 PDF 파싱 → 전체 시간표 또는 `course_id`별 시험 일시·장소 조회 | `eclass_sync_exam_schedules`, `eclass_get_exam_schedule` |
 | 강의계획서 | 과목명/교수명으로 검색 → OZ 데이터셋에서 교재·평가·주차일정 조회 | `eclass_search_syllabus`, `eclass_get_syllabus` |
@@ -142,8 +139,7 @@ pnpm run setup
 
 `pnpm run setup`은 대화형으로 ID/비밀번호를 받아 **비밀번호는 OS 자격증명 저장소에 저장**하고
 (설정 파일에 평문으로 남기지 않음), MCP 클라이언트 설정에 서버 항목을 써 줍니다.
-기본 경로는 로컬 데스크톱용 stdio MCP입니다. ChatGPT remote MCP / Secure Tunnel은
-아래의 선택 기능을 실행할 때만 별도로 켭니다.
+기본 경로는 로컬 데스크톱용 stdio MCP입니다.
 
 - 설정 대상은 자동 감지하거나 `--target`으로 지정합니다.
   - `--target mcp-json` → 프로젝트의 `.mcp.json` (Claude Code 등)
@@ -221,68 +217,6 @@ node dist/index.js
 여부·비밀번호 조회 결과를 한 줄로 보고합니다. 비밀번호 조회 실패 시 오류 메시지에도
 어떤 백엔드가 쓰였고 다음에 무엇을 실행해야 하는지가 포함됩니다.
 
-## ChatGPT 연결 (선택)
-
-ChatGPT UI나 Responses API의 remote MCP 서버로 붙일 때는 HTTP transport를 사용합니다.
-일반 로컬 데스크톱 사용에는 tunnel API key가 필요하지 않습니다. OpenAI Secure MCP
-Tunnel을 쓸 때만 Platform Tunnels에서 API key/tunnel id를 발급하고
-`pnpm run chatgptui`로 명시적으로 켭니다
-(자세히는 [`docs/CHATGPT_TUNNEL_SETUP.md`](docs/CHATGPT_TUNNEL_SETUP.md)).
-v1은 **개인용 단일 사용자 서버**입니다. 서버가 실행되는 머신의 `ECLASS_USERNAME`과
-자격증명 저장소(OS 저장소 또는 암호화 파일)에 저장된 LMS 비밀번호를 사용하며, ChatGPT
-사용자별 OAuth linking은 아직 지원하지 않습니다. 헤드리스 Linux 서버라면 OS 저장소
-대신 [암호화 백엔드](#헤드리스-서버-암호화-백엔드)로 준비하고 실행 시 `ECLASS_SECRET_KEY`
-또는 `ECLASS_SECRET_KEY_FILE`을 명시적으로 주입하세요.
-
-```bash
-# 1) 로컬 stdio 설정과 동일하게 credential store를 먼저 준비
-#    데스크톱은 기본 setup이면 충분합니다.
-#    헤드리스 서버는 명시적 키 주입 또는 아래 명령을 사용합니다.
-#    `pnpm run setup -- --target encrypted --generate-master-key-file <path>`
-pnpm run setup
-
-# 2) 빌드
-pnpm run build
-
-# 3) 로컬 remote MCP 서버 실행
-ECLASS_USERNAME=<your-id> \
-ECLASS_REMOTE_AUTH_TOKEN=<long-random-token> \
-node dist/index.js --http --port 8787
-
-# 개발 중 ChatGPT에서 접근할 HTTPS URL 노출
-ngrok http 8787
-```
-
-ChatGPT에서는 **Settings → Apps & Connectors → Advanced settings**에서 Developer Mode를
-켠 뒤, connector/app 생성 화면에 tunnel URL의 `/mcp` 경로를 넣습니다.
-
-```text
-https://<subdomain>.ngrok.app/mcp
-```
-
-HTTP 서버는 다음을 지원합니다.
-
-- `GET /` — health check
-- `POST/GET/DELETE /mcp` — MCP Streamable HTTP transport
-- `ECLASS_REMOTE_AUTH_TOKEN` — 설정 시 `Authorization: Bearer <token>`이 없는 `/mcp`
-  요청을 거부
-- `ECLASS_HTTP_ALLOWED_ORIGINS` — 콤마로 구분한 CORS origin allowlist. 미설정 시 DNS
-  리바인딩/로컬 CSRF 방지를 위해 `Origin` 헤더가 있는 브라우저 요청은 거부하고,
-  `Origin` 없는 MCP 클라이언트 요청만 허용
-
-로컬에서만 시험할 때는 `pnpm run dev:http`를 사용할 수 있고, 빌드 후에는
-`pnpm run start:http`가 `node dist/index.js --http --port 8787`을 실행합니다.
-인증 토큰을 비운 HTTP 모드는 **동일 머신 loopback 테스트에서만** 사용하세요.
-reverse proxy, ngrok, SSH/port forwarding으로 노출할 때는 반드시 긴 랜덤
-`ECLASS_REMOTE_AUTH_TOKEN`과 HTTPS 또는 동등한 tunnel 접근 제어를 모두 적용하세요.
-`Origin`/CORS 검사는 인증을 대체하지 않습니다.
-도구/metadata 변경 후에는 ChatGPT connector 설정에서 refresh해야 새 descriptor가 반영됩니다.
-Tunnel 자동 기동은 `pnpm run chatgptui` 또는 `pnpm run chatgptui:start`로 시작하고,
-`pnpm run chatgptui:status`로 pidfile 기반 상태를 확인하며,
-`pnpm run chatgptui:stop`으로 중지합니다.
-
-파일 조회/다운로드 도구는 파일을 ChatGPT에 첨부하지 않습니다. 자료는 먼저 MCP 서버 로컬 캐시에 저장되고, ChatGPT가 파일 내용을 직접 읽어야 할 때만 `eclass_file_handoff`가 공개 `/files/<token>` URL을 별도로 발급합니다. 반환 URL이 `https://.../files/<token>`처럼 외부에서 접근 가능하면 ChatGPT 브라우징으로 그 URL을 직접 열어야 합니다.
-
 ## 사용 예시
 
 | 자연어 요청 | 서버가 하는 일 |
@@ -299,25 +233,21 @@ Tunnel 자동 기동은 `pnpm run chatgptui` 또는 `pnpm run chatgptui:start`�
 
 ## 보안
 
-자격증명을 다루는 도구인 만큼 비밀 정보가 새지 않도록 설계했습니다.
-
 - 🔐 기본 `setup`은 비밀번호를 **OS 자격증명 저장소**(Keychain / libsecret) 또는
   AES-256-GCM 암호화 파일(`secrets.enc`)에만 저장하고 평문 파일 backend를 거부합니다.
   암호화 파일의 마스터 키는 비밀 관리 도구에서 주입하거나 repo 밖의 권한 `0600`
   파일로 분리합니다.
 - 🚫 **평문 env 비밀번호**(`ECLASS_PASSWORD`)는 `ALLOW_PLAINTEXT_ENV_SECRETS=1`로 **명시적으로 켰을 때만** 사용되고, 기본값에서는 무시됩니다. 이 override도 Canvas 토큰·세션용 secure backend를 대체하지 않습니다.
 - 🙈 인증 토큰·쿠키·CSRF와 제출 파일 바이트는 일반 도구 결과나 디버그 로그에
-  노출되지 않습니다. 단, stdio의 `eclass_file_handoff`를 명시적으로 호출하면 선택한
-  파일 바이트가 MCP 클라이언트에 base64로 전달되고, HTTP 모드에서는 제한시간 URL이
-  전달됩니다.
+  노출되지 않습니다. 단, `eclass_file_handoff`를 명시적으로 호출하면 선택한
+  파일 바이트가 MCP 클라이언트에 base64로 전달됩니다.
 - ✅ **과제 제출은 기본 `dry_run`** 이고, 기제출 과제는 `confirm_resubmit` 없이는 거부하는 이중 제출 방지 게이트가 있습니다.
 - 🌐 credential을 동반하는 트래픽은 **CAU 도메인 allowlist**로 제한하며, 검증된 공개
   CDN 요청에는 credential을 전달하지 않습니다.
-- 💾 캐시 DB와 다운로드 파일은 기본적으로 로컬에 저장됩니다. 다만 도구 결과는 연결된
-  MCP 클라이언트로 전달되며, ChatGPT/Tunnel 사용 시 요청한 결과와 공개 handoff URL은
-  해당 외부 서비스 경계를 통과합니다.
+- 💾 캐시 DB와 다운로드 파일은 로컬에 저장됩니다. 도구 결과는 연결된
+  MCP 클라이언트로 전달됩니다.
 
-HTTP 노출, Canvas 액세스 토큰 교체, tunnel 키 최소 권한, 사고 대응 절차는
+Canvas 액세스 토큰 교체와 사고 대응 절차는
 [`docs/SECURITY.md`](docs/SECURITY.md)를 따르세요.
 
 ## 환경 변수
@@ -328,19 +258,12 @@ HTTP 노출, Canvas 액세스 토큰 교체, tunnel 키 최소 권한, 사고 �
 | `ECLASS_DOWNLOAD_DIR` | `~/Downloads/eclass` | 다운로드 저장 위치 |
 | `ECLASS_DB_PATH` | `~/.eclass-mcp/files.db` | 다운로드/강의 캐시 DB |
 | `ECLASS_EXAM_DB_PATH` | `~/.eclass-mcp/exams.db` | 시험 시간표 전용 DB |
-| `ECLASS_HANDOFF_MAX_BYTES` | `26214400` | `eclass_file_handoff`가 URL handoff를 허용할 파일의 최대 크기(바이트). 기본 25MB |
+| `ECLASS_HANDOFF_MAX_BYTES` | `26214400` | `eclass_file_handoff`가 본문을 반환할 파일의 최대 크기(바이트). 기본 25MB |
 | `ECLASS_CREDENTIAL_BACKEND` | auto | `encrypted` / `keytar` 강제, `file`은 legacy read-only. auto는 encrypted → keytar 순서이며 둘 다 없으면 실패 |
 | `ECLASS_SECRET_KEY` | (없음) | 암호화 백엔드 마스터 키(32바이트 base64). 실행 시 주입 |
 | `ECLASS_SECRET_KEY_FILE` | (없음) | repo 밖의 권한 `0600` 마스터 키 파일 경로(raw 32바이트 또는 base64 텍스트) |
 | `ECLASS_ENC_STORE_PATH` | `~/.eclass-mcp/secrets.enc` | 암호화 비밀번호 파일 경로 |
 | `ALLOW_PLAINTEXT_ENV_SECRETS` | 꺼짐 | `1`일 때만 `ECLASS_PASSWORD` env 허용. 토큰·세션용 keytar/encrypted backend는 별도 필수 |
-| `ECLASS_TRANSPORT` | `stdio` | `http`로 지정하면 remote MCP HTTP 서버 실행 |
-| `ECLASS_HTTP_PORT` / `PORT` | `8787` | HTTP transport 포트 |
-| `ECLASS_REMOTE_AUTH_TOKEN` | (없음) | 설정 시 `/mcp` Bearer 또는 `X-Eclass-Auth` 인증 강제 |
-| `ECLASS_HTTP_ALLOWED_ORIGINS` | Origin 요청 기본 거부 | HTTP CORS origin allowlist (콤마 구분) |
-| `CONTROL_PLANE_API_KEY` | (없음) | OpenAI tunnel 런타임 API 키 (Tunnels Read+Use). `pnpm run chatgptui`에서 사용 |
-| `CONTROL_PLANE_TUNNEL_ID` | (없음) | tunnel 식별자 (Platform Tunnels 발급) |
-| `ECLASS_TUNNEL_PROFILE_FILE` | `${XDG_CONFIG_HOME:-~/.config}/tunnel-client/eclass-mcp.yaml` | tunnel-client 프로파일 경로 오버라이드 |
 | `DEBUG` | 꺼짐 | `1`이면 stderr 디버그 로그 |
 
 ## 트러블슈팅
@@ -358,10 +281,8 @@ HTTP 노출, Canvas 액세스 토큰 교체, tunnel 키 최소 권한, 사고 �
 
 ```bash
 pnpm run dev      # tsx로 소스 직접 실행
-pnpm run dev:http # tsx로 HTTP /mcp 개발 서버 실행 (:8787)
 pnpm test         # node --test 기반 전체 테스트
 pnpm run build    # 타입체크 겸 빌드
-pnpm run start:http # 빌드된 HTTP /mcp 서버 실행 (:8787)
 pnpm run doctor   # 인증/HTTP API 사전 점검
 pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 ```
@@ -377,8 +298,7 @@ pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 ## 문서
 
 - [`docs/TOOLS.md`](docs/TOOLS.md) — 전체 도구 명세 및 사용 흐름
-- [`docs/CHATGPT_TUNNEL_SETUP.md`](docs/CHATGPT_TUNNEL_SETUP.md) — ChatGPT Secure MCP Tunnel 셋업
-- [`docs/SECURITY.md`](docs/SECURITY.md) — 배포 경계, 키 교체, 사고 대응
+- [`docs/SECURITY.md`](docs/SECURITY.md) — 키 관리, 사고 대응
 - [`docs/DISCOVERY.md`](docs/DISCOVERY.md) — eclass API 엔드포인트 디스커버리
 - [`docs/SELF_REPAIR.md`](docs/SELF_REPAIR.md) — 시험 파서 등 자가 점검·복구 절차
 - [`docs/SYLLABUS.md`](docs/SYLLABUS.md) — 강의계획서 검색·OZ 데이터 경로
