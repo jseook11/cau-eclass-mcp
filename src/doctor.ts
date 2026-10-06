@@ -64,16 +64,6 @@ async function checkPlaywright(): Promise<CheckResult> {
   }
 }
 
-async function checkEclassPlaywright(session: BrowserSession): Promise<CheckResult> {
-  try {
-    await session.ensurePlaywrightReady();
-    return { name: 'eclass Playwright', ok: true, detail: 'Chromium launch ok' };
-  } catch (err) {
-    const message = formatErrorDetail(err);
-    return { name: 'eclass Playwright', ok: false, detail: message };
-  }
-}
-
 async function checkEclassAuth(session: BrowserSession): Promise<CheckResult> {
   try {
     const result = await session.ensureAuthenticated();
@@ -238,11 +228,6 @@ export async function runDoctor(
       '`pnpm run setup -- --target hermes --username <id> --password-stdin`를 실행하세요. ' +
       '기존 .mcp.json 사용자는 `pnpm run setup -- --target mcp-json`를 실행하세요.';
     results.push({
-      name: 'eclass Playwright',
-      ok: false,
-      detail,
-    });
-    results.push({
       name: 'eclass auth',
       ok: false,
       detail,
@@ -275,15 +260,6 @@ export async function runDoctor(
     credentials.plaintextOverride,
   );
   const session = new BrowserSession(resolvedUsername, credentialFactory);
-
-  const eclassPlaywright = await checkEclassPlaywright(session);
-  results.push(eclassPlaywright);
-  if (!eclassPlaywright.ok) {
-    results.push({ name: 'eclass auth', ok: false, detail: 'Playwright 단계 실패로 건너뜀' });
-    results.push({ name: 'eclass courses API', ok: false, detail: 'Playwright 단계 실패로 건너뜀' });
-    results.push({ name: 'eclass courseresource', ok: false, detail: 'Playwright 단계 실패로 건너뜀' });
-    return results;
-  }
 
   const auth = await checkEclassAuth(session);
   results.push(auth);

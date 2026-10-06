@@ -224,8 +224,8 @@ const GetSyllabusSchema = z.object({
   term: z.string().min(1),
   sbjtno1: z.string().min(1),
   clssno1: z.string().min(1),
-  campcd: z.string().optional(),
-  sust: z.string().optional(),
+  campcd: z.enum(['1', '2']),
+  sust: z.string().min(1),
 });
 
 // --- List tools handler ---
@@ -366,7 +366,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_get_syllabus',
-        description: '[mportal] 특정 강의의 강의계획서 본문을 구조화해 반환합니다(교재·평가비율·주차일정·교수정보 등). 입력 키는 eclass_search_syllabus 결과 행을 그대로 넘기세요.',
+        description: '[OZ 데이터] 강의계획서를 구조화해 반환합니다(교재·평가·일정·교수정보). 검색 결과의 course_code→sbjtno1, section→clssno1, campus_code→campcd, sust_code→sust를 전달하세요. raw_text에는 전체 보고서 데이터가 포함됩니다.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -375,9 +375,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             sbjtno1: { type: 'string', description: '학수번호' },
             clssno1: { type: 'string', description: '분반' },
             campcd: { type: 'string' },
-            sust: { type: 'string' },
+            sust: { type: 'string', description: '검색 결과의 sust_code (학과 코드)' },
           },
-          required: ['year', 'term', 'sbjtno1', 'clssno1'],
+          required: ['year', 'term', 'sbjtno1', 'clssno1', 'campcd', 'sust'],
         },
       },
       {
@@ -736,7 +736,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'eclass_get_syllabus': {
         const parsed = GetSyllabusSchema.parse(args ?? {});
-        const result = await getSyllabus(session, parsed);
+        const result = await getSyllabus(parsed);
         return { isError: !result.ok, content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
 

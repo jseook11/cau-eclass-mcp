@@ -76,5 +76,5 @@ export interface SyllabusDocument {
   textbooks: SyllabusTextbook[];
   assessment: SyllabusAssessment[];
   schedule: SyllabusScheduleWeek[];
-  raw_text: string; // 파싱 누락분 fallback (항상 포함)
+  raw_text: string; // 원본 보고서 데이터의 텍스트 표현 (항상 포함)
 }

@@ -9,7 +9,7 @@
 
 중앙대 eclass(LearningX / Canvas LMS)를 다루는 **MCP 서버**입니다. 강의·과제·성적 조회,
 자료/동영상 다운로드, 과제 제출, 중간·기말시험 시간표 조회, 강의계획서(syllabus) 검색·조회를
-하나의 도구 세트로 제공합니다. 인증(secure backend 토큰 캐시 → 만료 시 Playwright 자동 로그인),
+하나의 도구 세트로 제공합니다. 인증(secure backend 토큰 캐시 → 만료 시 HTTP SSO 로그인),
 타임아웃·재시도, 부분 실패 처리는 서버가 알아서 흡수하므로 클라이언트는 자연어 요청만
 던지면 됩니다.
 
@@ -73,7 +73,7 @@ MCP 클라이언트에서 자연어로 요청하면 서버가 필요한 도구�
 | 자료 | 강의 자료 목록 수집, MCP 서버 로컬 다운로드, 공개 URL handoff 별도 발급 | `eclass_get_materials`, `eclass_download_materials_batch`, `eclass_file_handoff` |
 | 동영상 | OCS UniPlayer MP4 동영상을 MCP 서버 로컬에 다운로드 | `eclass_download_video` |
 | 시험 시간표 | 중간·기말시험 공지 PDF 파싱 → 전체 시간표 또는 `course_id`별 시험 일시·장소 조회 | `eclass_sync_exam_schedules`, `eclass_get_exam_schedule` |
-| 강의계획서 | 과목명/교수명으로 검색 → OZ 리포트 PDF를 구조화(교재·평가·주차일정) 조회 | `eclass_search_syllabus`, `eclass_get_syllabus` |
+| 강의계획서 | 과목명/교수명으로 검색 → OZ 데이터셋에서 교재·평가·주차일정 조회 | `eclass_search_syllabus`, `eclass_get_syllabus` |
 | 백업 | 강의 스냅샷을 JSON/Markdown으로 내보내기 | `eclass_export_course_snapshot` |
 | 진단 | 인증·브라우저·API 사전 점검 | `eclass_doctor` |
 
@@ -88,18 +88,18 @@ MCP 클라이언트에서 자연어로 요청하면 서버가 필요한 도구�
   `term: "2026-S"`로 하계, `term: "2025-W"`로 동계 시간표를 조회합니다. 동계 키의 연도는 학년도이므로 다음 해 1월 시험도 포함합니다.
   기본 전용 소스는 서울캠퍼스 교양대학·소프트웨어대학·경영경제대학이며, 계절학기는 경영경제대학 공식 공지/PDF도 자동 탐색합니다.
   다른 공지는 `source_url`로 지정할 수 있습니다(지원 PDF 형식에 한함). 공지 미게시나 파싱 실패는 `partial_failures`와 소스 상태를 확인하세요.
-- **강의계획서** — CAU 포털(mportal2)+OZ 리포트 서버에서 받아오며, "OO 과목 교재 보통 뭐 써?" 같은 질문에 **학기와 무관하게** 답합니다. PDF를 `pdftotext`로 파싱해 교재·평가비율·주차별 주제를 구조화하고 원문 전체를 `raw_text`로도 제공합니다.
+- **강의계획서** — CAU 포털(mportal2)+OZ 리포트 서버에서 받아오며, "OO 과목 교재 보통 뭐 써?" 같은 질문에 **학기와 무관하게** 답합니다. HTTP로 받은 OZ 데이터셋을 교재·평가비율·주차별 주제로 구조화하고, 전체 보고서 데이터를 `raw_text`로도 제공합니다.
 
 ## 동작 원리
 
-인증은 OS 자격증명 저장소에 캐시된 토큰을 먼저 쓰고 만료됐을 때만 Playwright로
-자동 로그인해 토큰을 재발급·캐시합니다. **비밀번호는 OS 자격증명 저장소를 떠나지 않습니다.**
+인증은 OS 자격증명 저장소에 캐시된 토큰을 먼저 쓰고 만료됐을 때만 HTTP SSO로
+자동 로그인해 토큰을 재발급·캐시합니다. 비밀번호는 OS 자격증명 저장소에서 읽어 인증 요청 동안 사용합니다.
 
 ```mermaid
 flowchart LR
     A["MCP 도구 호출"] --> B{"Keychain에 유효 토큰?"}
     B -->|"있음"| D["eclass API 호출"]
-    B -->|"없음 또는 만료"| C["Playwright 자동 로그인"]
+    B -->|"없음 또는 만료"| C["HTTP SSO 로그인"]
     C --> E["토큰 재발급 후 Keychain 캐시"]
     E --> D
     D --> F["구조화 결과 반환"]
@@ -112,7 +112,7 @@ flowchart TD
     S["eclass-mcp 서버"] --> C["Canvas REST API (강의·과제·성적·공지)"]
     S --> L["LearningX 내부 API (강의 자료·주차학습)"]
     S --> O["OCS UniPlayer (동영상 MP4)"]
-    S --> M["mportal2 + OZ 리포트 (강의계획서 PDF)"]
+    S --> M["mportal2 + OZ 데이터셋 (강의계획서)"]
     C -.->|"읽기 우선, 실패 시"| P["Playwright 폴백"]
     L -.-> P
 ```
@@ -124,8 +124,8 @@ flowchart TD
 - **자격증명 저장소** — 다음 중 하나에 LMS 비밀번호를 저장합니다.
   - **OS 자격증명 저장소** — macOS Keychain / Linux Secret Service(libsecret). 데스크톱 환경 기본값.
   - **암호화 파일 저장소**(`secrets.enc`) — Keychain/D-Bus가 없는 **헤드리스 Linux 서버**용. AES-256-GCM으로 암호화하고 마스터 키는 비밀 관리 도구에서 주입하거나 repo 밖의 권한 `0600` 파일로 분리합니다. 자세한 내용은 [헤드리스 서버: 암호화 백엔드](#헤드리스-서버-암호화-백엔드).
-- **Playwright Chromium** — 자동 로그인·일부 자료 인터셉트용. `postinstall`에서 자동 설치됩니다.
-- **pdftotext**(poppler) — 시험 시간표·강의계획서 PDF 파싱용. 없으면 시험 동기화가 `EXAM_PARSER_UNAVAILABLE`을, 강의계획서 조회가 `SYLLABUS_PARSER_UNAVAILABLE`을 부분 실패로 남기고 **다른 기능은 정상 동작**합니다.
+- **Playwright Chromium** — 일부 자료 인터셉트·다운로드용. `postinstall`에서 자동 설치됩니다.
+- **pdftotext**(poppler) — 시험 시간표 PDF 파싱용. 없으면 시험 동기화가 `EXAM_PARSER_UNAVAILABLE`을 부분 실패로 남깁니다.
   - macOS: `brew install poppler`
 
 ## 빠른 시작
@@ -350,7 +350,7 @@ HTTP 노출, Canvas 액세스 토큰 교체, tunnel 키 최소 권한, 사고 �
 |---|---|
 | MCP 연결 시 `-32000` 오류 | `pnpm start`로 띄우면 stdout 배너가 JSON-RPC를 오염시킵니다. **`node dist/index.js`로 직접 실행**하세요(셋업이 생성하는 설정도 이 형태). |
 | 도구가 안 보임 / 실행 안 됨 | `pnpm run build`로 `dist/`를 먼저 빌드했는지, 클라이언트를 재시작했는지 확인하세요. |
-| 시험·강의계획서 PDF 파싱이 비어 있음 | `pdftotext`(poppler)가 없을 때입니다. macOS는 `brew install poppler`. 다른 기능은 정상 동작합니다. |
+| 시험 시간표 PDF 파싱이 비어 있음 | `pdftotext`(poppler)가 없을 때입니다. macOS는 `brew install poppler`. 다른 기능은 정상 동작합니다. |
 | 첫 실행 시 키체인 접근 권한 요청 | OS 자격증명 저장소 접근 권한을 허용해야 토큰을 캐시할 수 있습니다. |
 | 헤드리스 서버에서 비밀번호를 못 찾음(`Password not found ... backend=...`) | Keychain/D-Bus가 없는 환경입니다. `pnpm run setup -- --target encrypted --generate-master-key-file <path>`로 암호화 저장소와 키 파일을 만들고, 실행 시 `ECLASS_CREDENTIAL_BACKEND=encrypted`와 `ECLASS_SECRET_KEY_FILE=<path>`를 주입하세요. 오류 메시지가 활성 백엔드와 다음 조치를 알려줍니다. [암호화 백엔드](#헤드리스-서버-암호화-백엔드) 참고. |
 | 로그인·인증이 계속 실패 | `pnpm run doctor`로 인증·브라우저·API·자격증명 백엔드 상태를 점검하세요. |
@@ -382,6 +382,8 @@ pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 - [`docs/SECURITY.md`](docs/SECURITY.md) — 배포 경계, 키 교체, 사고 대응
 - [`docs/DISCOVERY.md`](docs/DISCOVERY.md) — eclass API 엔드포인트 디스커버리
 - [`docs/SELF_REPAIR.md`](docs/SELF_REPAIR.md) — 시험 파서 등 자가 점검·복구 절차
+- [`docs/SYLLABUS.md`](docs/SYLLABUS.md) — 강의계획서 검색·OZ 데이터 경로
+- [`docs/HTTP-SESSION.md`](docs/HTTP-SESSION.md) — HTTP 인증 세션·쿠키·토큰
 
 ## Claude Code 스킬 (선택)
 

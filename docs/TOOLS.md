@@ -19,7 +19,7 @@ skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 �
     존재하는 최소 필드만). partial success·optional 필드·`{ ok: false, error_code, ... }` 실패 응답이
     같은 스키마로 통과한다.
 - 툴 description은 `[로컬]`/`[네트워크]` 접두사로 비용을 표시한다. `[로컬]`은 로컬 DB/캐시만 사용해 즉시 반환, `[네트워크]`는 Canvas API 호출이며 첫 호출 시 자동 로그인이 끼어들 수 있다. 같은 정보를 얻을 수 있다면 `[로컬]` 도구를 우선한다.
-- 인증은 서버가 알아서 처리한다 (Keychain 토큰 캐시 → 만료 시 Playwright 자동 로그인). 호출 측에서 신경 쓸 것 없음.
+- 인증은 서버가 알아서 처리한다 (Keychain 토큰 캐시 → 만료 시 HTTP SSO 자동 로그인). 호출 측에서 신경 쓸 것 없음.
   - 서버 측에서 토큰이 만료/회수되어 401이 돌아오면 캐시 토큰을 폐기하고 자동 재로그인 후 해당 요청을 1회 재시도한다.
 - 모든 HTTP 요청에 타임아웃이 걸려 있다 (API 30초, 파일 다운로드 5분, 동영상 다운로드 30분). eclass가 응답을 멈춰도 툴이 무한 대기하지 않는다.
 - `course_id`는 숫자. Canvas가 문자열 ID를 반환해도 서버가 양의 안전 정수로 정규화한 뒤
@@ -227,7 +227,7 @@ upsert가 아닌 최신 스냅샷으로 교체한다. 이전 강의 이름은 �
 
 ### eclass_search_syllabus
 
-CAU mportal2에서 교과목계획서(syllabus)를 검색한다. 과목명 또는 교수명으로 검색한 후보 목록을 그대로 반환하며, 매칭 판단은 하지 않는다 (호출자 LLM이 후보 중 선택).
+사용자 HTTP SSO 세션으로 CAU mportal2에서 교과목계획서(syllabus)를 검색한다. 과목명 또는 교수명으로 검색한 후보 목록을 그대로 반환하며, 매칭 판단은 하지 않는다 (호출자 LLM이 후보 중 선택).
 
 - 입력: `{ year?: string, term?: string, query: string, by?: 'subject'|'professor' = 'subject' }`
   - `year`: 개설년도 (예: `"2026"`). 생략 시 현재 학기 기준으로 추정.
@@ -244,8 +244,8 @@ CAU mportal2에서 교과목계획서(syllabus)를 검색한다. 과목명 또�
 
 특정 강의 1개의 구조화된 교과목계획서를 반환한다. `eclass_search_syllabus` 결과 행의 필드를 그대로 전달하는 것을 권장한다.
 
-- 입력: `{ year: string, term: string, sbjtno1: string(학수번호), clssno1: string(분반), campcd?: string, sust?: string }`
-  - `year`/`term`/`sbjtno1`/`clssno1`은 필수.
+- 입력: `{ year: string, term: string, sbjtno1: string(학수번호), clssno1: string(분반), campcd: string, sust: string }`
+  - 여섯 식별자는 모두 필수다. 검색 결과의 `campus_code`를 `campcd`, `sust_code`를 `sust`로 그대로 전달한다. 누락하면 `SYLLABUS_INVALID_INPUT`이다.
 - 출력(성공): `{ ok: true, document: SyllabusDocument }`
   - `SyllabusDocument`:
     - `basic`: `{ year, term, campus, course_code, section, credit, title_ko, title_en, time_room, classification, lecture_type, course_type, medium, college, department, eclass_usage }`
@@ -254,11 +254,11 @@ CAU mportal2에서 교과목계획서(syllabus)를 검색한다. 과목명 또�
     - `textbooks[]`
     - `assessment[]`: `{ item, ratio, description }`
     - `schedule[]`: `{ week, instructor, topic, ... }`
-    - `raw_text`: 항상 포함됨. `pdftotext -layout`로 추출한 전체 텍스트(표 구조 보존). **구조화 필드가 누락·부정확할 때 1차 폴백** — 특히 교재 출판사/판차나 제목이 긴 경우 컬럼 충돌로 어긋날 수 있으니 `raw_text`로 확인.
+    - `raw_text`: 항상 포함됨. 그룹명과 원본 보고서 데이터의 JSON 텍스트. 구조화 항목 외의 수업 방식·과제 등은 이 필드에서 확인한다.
 - 출력(실패): `{ ok: false, error_code, message }`
-  - 주요 코드: `SYLLABUS_OZ_UNAVAILABLE`(OZ 리포트 서버 응답 실패), `SYLLABUS_PARSER_UNAVAILABLE`(`pdftotext` 없음), `SYLLABUS_EXTRACT_FAILED`.
-- **파싱 방식**: OZ PDF를 `pdftotext`로 **두 번** 추출한다 — 기본(reading-order)은 기본정보·교수·평가·과목설명 등 scalar 필드용, `-layout`은 2-D 표(교재·주차일정)를 컬럼 위치 기반으로 분리하는 데 사용한다. 표는 헤더에서 컬럼 시작 위치를 잡고 행을 앵커(주차번호/교재종류)로 분할해 래핑된 셀을 병합한다. 추출 불가/모호한 값은 라벨을 흘리지 않고 `null` 처리(정직한 폴백), 전체 원문은 `raw_text`가 보장한다.
-- **의존성**: CAU OZ 리포트 서버에서 PDF로 받아 `pdftotext`(poppler)로 파싱한다. macOS는 `brew install poppler`로 설치 필요 — 설치되어 있지 않으면 `SYLLABUS_PARSER_UNAVAILABLE`을 반환한다.
+  - 주요 코드: `SYLLABUS_INVALID_INPUT`, `SYLLABUS_NOT_FOUND`, `SYLLABUS_IDENTITY_MISMATCH`, `SYLLABUS_TRANSPORT_FAILED`, `SYLLABUS_PROTOCOL_FAILED`, `SYLLABUS_MAPPING_FAILED`, `SYLLABUS_INTERNAL_ERROR`.
+- **데이터 경로**: OZ guest HTTP 세션 → `pUskLei008.odi` 데이터 모듈 → schema/record 디코딩 → `SyllabusDocument` 매핑. 학기·캠퍼스·학과·학수번호·분반을 응답과 대조한다.
+- **본문 조회**: 사용자 로그인 없이 학교 report 서버의 guest 조회를 사용한다. 검색은 사용자 포털 인증이 필요하다. 상세 구현은 [SYLLABUS.md](SYLLABUS.md)를 참고한다.
 
 ### eclass_search_downloads
 

@@ -183,7 +183,7 @@ switch (command) {
     const session = await buildSession();
     const { getSyllabus, searchSyllabusList } = await import('../src/mportal-client.js');
     const search = await searchSyllabusList(session, { year, term, query: '' });
-    const detail = await getSyllabus(session, { year, term, campcd, sust, sbjtno1, clssno1 });
+    const detail = await getSyllabus({ year, term, campcd, sust, sbjtno1, clssno1 });
     printJson({ search, detail });
     break;
   }

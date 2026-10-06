@@ -21,7 +21,7 @@ ChatGPT용 원격 MCP는 이 동기화본을 검색·조회·제공한다.
 - 공지·자료·과제를 별도 DB에 저장하면 과목을 넘나드는 검색, 최신 공지, 주간 자료, 마감일 목록을 구성할 수 있다.
 
 로그인·SSO는 이미 브라우저 없이 HTTP 요청으로 완료했다.
-구체적인 요청 순서와 실패·수정 과정은 [HTTP 로그인 탐사 기록](HTTP-LOGIN-DISCOVERY.md)에 있다.
+세션 구성과 검증 방법은 [HTTP 세션](HTTP-SESSION.md)에 있다.
 수집 경로도 HTTP로 전환하면 반복 실행에서 Chromium 시작·렌더링 비용을 줄일 수 있다.
 
 ## 전체 구조
@@ -190,5 +190,5 @@ R2 전체 저장소 키를 앱에 배포하지 않는다.
 - 서버 작업 수신 방식: 주기적 확인으로 시작할지, 연결 유지 방식으로 시작할지
 
 이 문서는 현재 선택한 구조와 구현 순서를 기록한다.
-HTTP 로그인 구현 기록은 [HTTP-LOGIN-DISCOVERY.md](HTTP-LOGIN-DISCOVERY.md),
+HTTP 인증 세션은 [HTTP-SESSION.md](HTTP-SESSION.md),
 기존 API 우선 수집 계획은 [API_PLAN.md](API_PLAN.md)를 함께 참고한다.

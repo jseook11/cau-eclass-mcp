@@ -26,6 +26,9 @@ Agents.md
 .context/
 .worktrees/
 _workspace/
+.commandcode/
+# local scratch scripts (real credentials/course data)
+scripts/_live-pl-courses.ts
 
 # Documentation and private analysis notes
 # docs/ is tracked (tool/discovery guides for skill harness); other stray .md stay ignored

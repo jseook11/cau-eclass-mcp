@@ -1,3 +1,5 @@
+import { HttpSession, SessionExpiredError } from './http-session.js';
+import { createCanvasTokenFromSession, listCanvasTokensFromSession, revokeCanvasTokenFromSession, type SessionTokenCreationResponse } from './canvas-session-tokens.js';
 import { chromium } from 'playwright';
 import type { BrowserContext, Frame, Page, Request, Response } from 'playwright';
 import * as fs from 'node:fs/promises';
@@ -18,7 +20,6 @@ import {
   pendingRevocationsForRotation,
   revokeCanvasToken,
   revocationForCreatedCanvasTokenCompensation,
-  revocationIdentifier,
   sameCachedTokenGeneration,
   sameCachedTokenSnapshot,
   selectCanvasTokenForRecovery,
@@ -131,21 +132,6 @@ async function deleteSessionFromKeychain(username: string): Promise<void> {
   }
 }
 
-interface BrowserTokenCreationResponse {
-  ok: boolean;
-  status: number;
-  responseUrl: string;
-  body: unknown;
-  bodyParsed: boolean;
-}
-
-interface BrowserTokenListResponse {
-  ok: boolean;
-  status: number;
-  responseUrl: string;
-  body: unknown;
-}
-
 class CanvasTokenCacheChangedError extends Error {
   constructor(readonly latest: CachedToken | null) {
     super('Canvas token cache changed during rotation');
@@ -190,156 +176,6 @@ function isSameOriginCanvasResponse(responseUrl: string): boolean {
   if (!responseUrl) return false;
   try {
     return new URL(responseUrl).origin === BASE_URL;
-  } catch {
-    return false;
-  }
-}
-
-export async function createCanvasTokenFromAuthenticatedPage(
-  page: Page,
-  requestedExpiresAt: string,
-  purpose: string,
-): Promise<BrowserTokenCreationResponse> {
-  if (new URL(page.url()).origin !== BASE_URL) {
-    throw new Error('Canvas token creation requires an authenticated same-origin page');
-  }
-
-  return page.evaluate(async ({ baseUrl, expiresAt, tokenPurpose, acceptHeader }) => {
-    if (window.location.origin !== baseUrl) {
-      throw new Error('Canvas token creation page changed origin');
-    }
-    const tokenForm = document.querySelector<HTMLFormElement>(
-      'form[action$="/profile/tokens"]',
-    );
-    if (!tokenForm) {
-      throw new Error('Canvas token creation form was not found');
-    }
-    const authenticityToken = tokenForm
-      .querySelector<HTMLInputElement>('input[name="authenticity_token"]')
-      ?.value.trim();
-    if (!authenticityToken) {
-      throw new Error('Canvas token creation form did not include an authenticity token');
-    }
-    const actionUrl = new URL(
-      tokenForm.getAttribute('action') ?? tokenForm.action,
-      window.location.href,
-    );
-    if (actionUrl.origin !== baseUrl || actionUrl.pathname !== '/profile/tokens') {
-      throw new Error('Canvas token creation form action was not same-origin');
-    }
-    const headers: Record<string, string> = {
-      Accept: acceptHeader,
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-    };
-
-    const form = new URLSearchParams();
-    form.set('authenticity_token', authenticityToken);
-    form.set('access_token[purpose]', tokenPurpose);
-    form.set('access_token[expires_at]', expiresAt);
-    const response = await fetch(actionUrl.toString(), {
-      method: 'POST',
-      credentials: 'same-origin',
-      redirect: 'error',
-      signal: AbortSignal.timeout(30_000),
-      headers,
-      body: form.toString(),
-    });
-    const text = await response.text();
-    let body: unknown = null;
-    let bodyParsed = false;
-    if (text) {
-      try {
-        body = JSON.parse(text) as unknown;
-        bodyParsed = true;
-      } catch {
-        body = null;
-      }
-    }
-    return {
-      ok: response.ok,
-      status: response.status,
-      responseUrl: response.url,
-      body,
-      bodyParsed,
-    };
-  }, {
-    baseUrl: BASE_URL,
-    expiresAt: requestedExpiresAt,
-    tokenPurpose: purpose,
-    acceptHeader: CANVAS_JSON_ACCEPT,
-  });
-}
-
-export async function listCanvasTokensFromAuthenticatedPage(page: Page): Promise<unknown> {
-  if (new URL(page.url()).origin !== BASE_URL) {
-    throw new Error('Canvas token recovery requires an authenticated same-origin page');
-  }
-  const result: BrowserTokenListResponse = await page.evaluate(
-    async ({ baseUrl, acceptHeader }) => {
-      if (window.location.origin !== baseUrl) {
-        throw new Error('Canvas token recovery page changed origin');
-      }
-      const response = await fetch(
-        '/api/v1/users/self/user_generated_tokens?per_page=100',
-        {
-          method: 'GET',
-          credentials: 'same-origin',
-          redirect: 'error',
-          signal: AbortSignal.timeout(15_000),
-          headers: { Accept: acceptHeader },
-        },
-      );
-      const text = await response.text();
-      return {
-        ok: response.ok,
-        status: response.status,
-        responseUrl: response.url,
-        body: text ? JSON.parse(text) as unknown : null,
-      };
-    },
-    { baseUrl: BASE_URL, acceptHeader: CANVAS_JSON_ACCEPT },
-  );
-  if (!isSameOriginCanvasResponse(result.responseUrl)) {
-    throw new Error('Canvas token recovery response came from an unexpected origin');
-  }
-  if (!result.ok) {
-    throw new Error(`Canvas token recovery listing failed (${result.status})`);
-  }
-  return result.body;
-}
-
-export async function revokeCanvasTokenFromAuthenticatedPage(
-  page: Page,
-  revocation: CachedTokenRevocation,
-): Promise<boolean> {
-  const identifier = revocationIdentifier(revocation);
-  if (!identifier) return false;
-
-  try {
-    if (new URL(page.url()).origin !== BASE_URL) return false;
-    const result = await page.evaluate(async ({ baseUrl, tokenIdentifier, acceptHeader }) => {
-      if (window.location.origin !== baseUrl) return { status: 0, responseUrl: '' };
-      const csrfToken = (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement | null)?.content;
-      const headers: Record<string, string> = { Accept: acceptHeader };
-      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
-      const response = await fetch(
-        `/api/v1/users/self/tokens/${encodeURIComponent(tokenIdentifier)}`,
-        {
-          method: 'DELETE',
-          credentials: 'same-origin',
-          redirect: 'error',
-          signal: AbortSignal.timeout(15_000),
-          headers,
-        },
-      );
-      return { status: response.status, responseUrl: response.url };
-    }, {
-      baseUrl: BASE_URL,
-      tokenIdentifier: identifier,
-      acceptHeader: CANVAS_JSON_ACCEPT,
-    });
-    if (!result.responseUrl || new URL(result.responseUrl).origin !== BASE_URL) return false;
-    return (result.status >= 200 && result.status < 300) || result.status === 404;
   } catch {
     return false;
   }
@@ -734,7 +570,7 @@ export function buildOcsCaptureFailureMessage(details: OcsCaptureFailureDetails)
 
 export class BrowserSession {
   private client: CanvasClient | null = null;
-  // Single-flight lock: prevents parallel callers from each launching a browser login
+  // Single-flight lock: shares one HTTP login across parallel callers
   private loginPromise: Promise<CanvasClient> | null = null;
   private playwrightCheckPromise: Promise<void> | null = null;
   private lastPlaywrightCheckAt = 0;
@@ -746,7 +582,7 @@ export class BrowserSession {
 
   /**
    * @param credentialFactory - called only at login time; result goes out of scope
-   *   after the Playwright fill call, narrowing the heap exposure window to ~20s.
+   *   after the HTTP form submission.
    */
   constructor(
     private username: string,
@@ -755,7 +591,7 @@ export class BrowserSession {
 
   /**
    * Returns a CanvasClient with a valid token.
-   * Reads token cache first; if missing or expired, launches a headless browser
+   * Reads token cache first; if missing or expired, uses HTTP SSO
    * to log in and issue a new Canvas API token.
    * Concurrent calls share a single login attempt via loginPromise.
    */
@@ -939,246 +775,191 @@ export class BrowserSession {
       cached = usableCached;
     }
 
-    // Need to log in and issue a new token
-    debugLog('browser-session', 'Launching browser for login');
-    const browser = await chromium.launch({ headless: true });
+    debugLog('browser-session', 'Authenticating via HTTP SSO');
+    const context = new HttpSession();
+    await context.login(this.username, this.credentialFactory);
+    const requestStartedAt = new Date().toISOString();
+    const requestedExpiresAt = new Date(
+      Date.parse(requestStartedAt) + CANVAS_TOKEN_LIFETIME_MS,
+    ).toISOString();
+    const purpose = createCanvasTokenPurpose();
+    let creation: SessionTokenCreationResponse | null = null;
+    let creationCallError: unknown = null;
     try {
-      const context = await browser.newContext({
-        locale: 'ko-KR',
-        timezoneId: 'Asia/Seoul',
-      });
-      const page = await context.newPage();
-      await this.loginToEclass(page);
+      creation = await createCanvasTokenFromSession(
+        context,
+        requestedExpiresAt,
+        purpose,
+      );
+    } catch (err) {
+      // The POST may have committed before fetch/response transport failed.
+      // Compensation below reconciles by this attempt's unique purpose.
+      creationCallError = err;
+    }
+    const candidate = creation
+      ? extractCreatedCanvasTokenCandidate(creation.body)
+      : null;
+    let persisted = false;
 
-      // Establish a same-origin authenticated page, then call Canvas's token API
-      // with that page's cookies and CSRF token. The secret never enters the DOM.
-      debugLog('browser-session', 'Creating a 90-day Canvas API token from an authenticated page');
-      await page.goto(`${BASE_URL}/profile/settings`, { waitUntil: 'networkidle', timeout: 15000 });
-      if (isSsoLoginUrl(page.url())) {
-        throw new Error('로그인 세션이 프로필 설정 페이지로 이동하기 전에 만료되었습니다.');
-      }
-      const requestStartedAt = new Date().toISOString();
-      const requestedExpiresAt = new Date(
-        Date.parse(requestStartedAt) + CANVAS_TOKEN_LIFETIME_MS,
-      ).toISOString();
-      const purpose = createCanvasTokenPurpose();
-      let creation: BrowserTokenCreationResponse | null = null;
-      let creationCallError: unknown = null;
-      try {
-        creation = await createCanvasTokenFromAuthenticatedPage(
-          page,
-          requestedExpiresAt,
-          purpose,
-        );
-      } catch (err) {
-        // The POST may have committed before fetch/response transport failed.
-        // Compensation below reconciles by this attempt's unique purpose.
-        creationCallError = err;
-      }
-      const candidate = creation
-        ? extractCreatedCanvasTokenCandidate(creation.body)
-        : null;
-      let persisted = false;
-
-      try {
-        if (!creation) {
-          throw new Error('Canvas token creation response was not received', {
-            cause: creationCallError,
-          });
-        }
-        if (!isSameOriginCanvasResponse(creation.responseUrl)) {
-          throw new Error('Canvas token creation response came from an unexpected origin');
-        }
-        if (!creation.ok) {
-          throw new Error(`Canvas token creation failed (${creation.status})`);
-        }
-        if (!candidate) {
-          throw new Error('Canvas token creation response did not include a visible token');
-        }
-
-        let newCached = createCachedTokenV2(candidate, requestStartedAt, requestedExpiresAt);
-
-        // Validate before persisting. Any failure below is compensated by
-        // revoking the newly-created token while the browser session is alive.
-        const validateRes = await fetch(`${BASE_URL}/api/v1/users/self`, {
-          redirect: 'error',
-          signal: AbortSignal.timeout(30_000),
-          headers: { Authorization: `Bearer ${newCached.token}`, Accept: CANVAS_JSON_ACCEPT },
+    try {
+      if (!creation) {
+        throw new Error('Canvas token creation response was not received', {
+          cause: creationCallError,
         });
-        if (!validateRes.ok) {
-          throw new Error(
-            `토큰 검증 실패 (${validateRes.status}): 로그인에 문제가 있습니다.\n` +
-            '  pnpm run setup 을 다시 실행하세요.',
+      }
+      if (!isSameOriginCanvasResponse(creation.responseUrl)) {
+        throw new Error('Canvas token creation response came from an unexpected origin');
+      }
+      if (!creation.ok) {
+        throw new Error(`Canvas token creation failed (${creation.status})`);
+      }
+      if (!candidate) {
+        throw new Error('Canvas token creation response did not include a visible token');
+      }
+
+      let newCached = createCachedTokenV2(candidate, requestStartedAt, requestedExpiresAt);
+
+      // Validate before persisting. Any failure below is compensated by
+      // revoking the newly-created token using the authenticated HTTP session.
+      const validateRes = await fetch(`${BASE_URL}/api/v1/users/self`, {
+        redirect: 'error',
+        signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${newCached.token}`, Accept: CANVAS_JSON_ACCEPT },
+      });
+      if (!validateRes.ok) {
+        throw new Error(
+          `토큰 검증 실패 (${validateRes.status}): 로그인에 문제가 있습니다.\n` +
+          '  pnpm run setup 을 다시 실행하세요.',
+        );
+      }
+
+      await lock.assertOwned();
+      const latestCached = await readTokenFromKeychain(this.username);
+      if (!sameCachedTokenGeneration(cached, latestCached)) {
+        throw new CanvasTokenCacheChangedError(latestCached);
+      }
+      // A same-generation queue may have been compacted by a process that did
+      // not yet implement the lock. Merge from the latest snapshot.
+      newCached = {
+        ...newCached,
+        pending_revocations: pendingRevocationsForRotation(latestCached, newCached),
+      };
+
+      // Persist the new token (including the old-token revocation queue)
+      // before attempting any old-token deletion. A crash can only leave a
+      // retryable queue, never lose the metadata required to revoke it.
+      const sessionState = await context.storageState();
+      await writeSessionToKeychain(this.username, sessionState);
+      await lock.assertOwned();
+      const beforeTokenWrite = await readTokenFromKeychain(this.username);
+      if (!sameCachedTokenSnapshot(latestCached, beforeTokenWrite)) {
+        throw new CanvasTokenCacheChangedError(beforeTokenWrite);
+      }
+      try {
+        await writeTokenToKeychain(this.username, newCached);
+        persisted = true;
+      } catch (err) {
+        // Do not revoke a token that the backend durably stored before
+        // reporting a post-write verification/cleanup error.
+        const observed = await readTokenFromKeychain(this.username);
+        persisted = sameCachedTokenSnapshot(observed, newCached);
+        throw err;
+      }
+      debugLog('browser-session', 'New Canvas token and revocation metadata stored securely');
+
+      newCached = await this.retryPendingTokenRevocations(
+        newCached,
+        revocationLedger,
+        lock,
+      );
+      this.lastAuthSource = 'login';
+      this.client = this.createCanvasClient(newCached.token);
+      return this.client;
+    } catch (err) {
+      let unresolvedCreatedRevocation: CachedTokenRevocation | null = null;
+      let compensationRevocation = creation
+        ? revocationForCreatedCanvasTokenCompensation(creation, persisted)
+        : null;
+      const requiresExactRecovery = !persisted &&
+        !compensationRevocation &&
+        (
+          creation === null ||
+          !isSameOriginCanvasResponse(creation.responseUrl) ||
+          !creation.bodyParsed ||
+          creation.ok
+        );
+      if (requiresExactRecovery) {
+        try {
+          const listedTokens = await listCanvasTokensFromSession(context);
+          const selection = selectCanvasTokenForRecovery(listedTokens, {
+            purpose,
+            request_started_at: requestStartedAt,
+            requested_expires_at: requestedExpiresAt,
+            observed_at: new Date().toISOString(),
+          });
+          if (selection.kind !== 'found') {
+            throw new Error(`Exact Canvas token recovery result: ${selection.kind}`);
+          }
+          compensationRevocation = selection.revocation;
+        } catch (recoveryErr) {
+          throw buildCanvasTokenRecoveryManualCleanupError(err, recoveryErr);
+        }
+      }
+      if (compensationRevocation) {
+        let revoked = await revokeCanvasTokenFromSession(context, compensationRevocation);
+        if (
+          !revoked &&
+          candidate &&
+          creation &&
+          isSameOriginCanvasResponse(creation.responseUrl)
+        ) {
+          revoked = await revokeCanvasToken(
+            candidate.token,
+            compensationRevocation,
           );
         }
-
-        await lock.assertOwned();
-        const latestCached = await readTokenFromKeychain(this.username);
-        if (!sameCachedTokenGeneration(cached, latestCached)) {
-          throw new CanvasTokenCacheChangedError(latestCached);
+        if (!revoked) {
+          debugLog('browser-session', 'Could not compensate by revoking the newly-created Canvas token');
+          unresolvedCreatedRevocation = compensationRevocation;
         }
-        // A same-generation queue may have been compacted by a process that did
-        // not yet implement the lock. Merge from the latest snapshot.
-        newCached = {
-          ...newCached,
-          pending_revocations: pendingRevocationsForRotation(latestCached, newCached),
-        };
-
-        // Persist the new token (including the old-token revocation queue)
-        // before attempting any old-token deletion. A crash can only leave a
-        // retryable queue, never lose the metadata required to revoke it.
-        const sessionState = await context.storageState();
-        await writeSessionToKeychain(this.username, sessionState);
-        await lock.assertOwned();
-        const beforeTokenWrite = await readTokenFromKeychain(this.username);
-        if (!sameCachedTokenSnapshot(latestCached, beforeTokenWrite)) {
-          throw new CanvasTokenCacheChangedError(beforeTokenWrite);
-        }
+      }
+      if (unresolvedCreatedRevocation) {
+        const activeForSafety = err instanceof CanvasTokenCacheChangedError
+          ? err.latest
+          : cached;
         try {
-          await writeTokenToKeychain(this.username, newCached);
-          persisted = true;
-        } catch (err) {
-          // Do not revoke a token that the backend durably stored before
-          // reporting a post-write verification/cleanup error.
-          const observed = await readTokenFromKeychain(this.username);
-          persisted = sameCachedTokenSnapshot(observed, newCached);
-          throw err;
+          await revocationLedger.append(lock, unresolvedCreatedRevocation, activeForSafety);
+        } catch (ledgerErr) {
+          throw buildCanvasTokenCompensationRetentionError(err, ledgerErr);
         }
-        debugLog('browser-session', 'New Canvas token and revocation metadata stored securely');
-
-        newCached = await this.retryPendingTokenRevocations(
-          newCached,
+        debugLog('browser-session', 'Retained failed Canvas token compensation in the secure ledger');
+      }
+      const latest = err instanceof CanvasTokenCacheChangedError
+        ? err.latest
+        : await readTokenFromKeychain(this.username);
+      if (err instanceof CanvasTokenCacheChangedError && latest) {
+        if (!canAdoptCachedToken(latest, rejectedToken)) throw err;
+        debugLog('browser-session', 'Adopting Canvas token that won a concurrent cache update');
+        const adopted = await this.retryPendingTokenRevocations(
+          latest,
           revocationLedger,
           lock,
         );
-        this.lastAuthSource = 'login';
-        this.client = this.createCanvasClient(newCached.token);
-        return this.client;
-      } catch (err) {
-        let unresolvedCreatedRevocation: CachedTokenRevocation | null = null;
-        let compensationRevocation = creation
-          ? revocationForCreatedCanvasTokenCompensation(creation, persisted)
-          : null;
-        const requiresExactRecovery = !persisted &&
-          !compensationRevocation &&
-          (
-            creation === null ||
-            !isSameOriginCanvasResponse(creation.responseUrl) ||
-            !creation.bodyParsed ||
-            creation.ok
-          );
-        if (requiresExactRecovery) {
-          try {
-            const listedTokens = await listCanvasTokensFromAuthenticatedPage(page);
-            const selection = selectCanvasTokenForRecovery(listedTokens, {
-              purpose,
-              request_started_at: requestStartedAt,
-              requested_expires_at: requestedExpiresAt,
-              observed_at: new Date().toISOString(),
-            });
-            if (selection.kind !== 'found') {
-              throw new Error(`Exact Canvas token recovery result: ${selection.kind}`);
-            }
-            compensationRevocation = selection.revocation;
-          } catch (recoveryErr) {
-            throw buildCanvasTokenRecoveryManualCleanupError(err, recoveryErr);
-          }
+        if (canAdoptCachedToken(adopted, rejectedToken)) {
+          this.lastAuthSource = 'cache';
+          this.client = this.createCanvasClient(adopted.token);
+          return this.client;
         }
-        if (compensationRevocation) {
-          let revoked = await revokeCanvasTokenFromAuthenticatedPage(page, compensationRevocation);
-          if (
-            !revoked &&
-            candidate &&
-            creation &&
-            isSameOriginCanvasResponse(creation.responseUrl)
-          ) {
-            revoked = await revokeCanvasToken(
-              candidate.token,
-              compensationRevocation,
-            );
-          }
-          if (!revoked) {
-            debugLog('browser-session', 'Could not compensate by revoking the newly-created Canvas token');
-            unresolvedCreatedRevocation = compensationRevocation;
-          }
-        }
-        if (unresolvedCreatedRevocation) {
-          const activeForSafety = err instanceof CanvasTokenCacheChangedError
-            ? err.latest
-            : cached;
-          try {
-            await revocationLedger.append(lock, unresolvedCreatedRevocation, activeForSafety);
-          } catch (ledgerErr) {
-            throw buildCanvasTokenCompensationRetentionError(err, ledgerErr);
-          }
-          debugLog('browser-session', 'Retained failed Canvas token compensation in the secure ledger');
-        }
-        const latest = err instanceof CanvasTokenCacheChangedError
-          ? err.latest
-          : await readTokenFromKeychain(this.username);
-        if (err instanceof CanvasTokenCacheChangedError && latest) {
-          if (!canAdoptCachedToken(latest, rejectedToken)) throw err;
-          debugLog('browser-session', 'Adopting Canvas token that won a concurrent cache update');
-          const adopted = await this.retryPendingTokenRevocations(
-            latest,
-            revocationLedger,
-            lock,
-          );
-          if (canAdoptCachedToken(adopted, rejectedToken)) {
-            this.lastAuthSource = 'cache';
-            this.client = this.createCanvasClient(adopted.token);
-            return this.client;
-          }
-        }
-        throw err;
       }
-    } finally {
-      await browser.close();
+      throw err;
     }
   }
 
-  private async loginToEclass(page: Page): Promise<void> {
-    // Navigate to login page
-    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
-
-    // Fill in credentials — password is read from factory and goes out of scope immediately
-    const password = await this.credentialFactory();
-    await page.locator("input[name='login_user_id']").fill(this.username);
-    await page.locator("input[name='login_user_password']").fill(password);
-
-    // Trigger login via JS and wait for navigation
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 }),
-      page.evaluate('OnLogon()'),
-    ]);
-
-    const parsedLoginUrl = new URL(page.url());
-    if (parsedLoginUrl.hostname !== 'eclass3.cau.ac.kr' || isSsoLoginUrl(page.url())) {
-      throw new Error(
-        '로그인 실패: 아이디 또는 비밀번호가 올바르지 않습니다.\n' +
-        '  pnpm run setup 을 다시 실행하여 비밀번호를 업데이트하세요.',
-      );
-    }
-    debugLog('browser-session', 'Login successful');
-  }
-
-  private async refreshBrowserSession(lock: CanvasTokenLock): Promise<void> {
-    debugLog('browser-session', 'Refreshing browser session via login');
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const context = await browser.newContext({
-        locale: 'ko-KR',
-        timezoneId: 'Asia/Seoul',
-      });
-      const page = await context.newPage();
-      await this.loginToEclass(page);
-      const sessionState = await context.storageState();
-      await lock.assertOwned();
-      await writeSessionToKeychain(this.username, sessionState);
-      debugLog('browser-session', 'Browser session refreshed in Keychain');
-    } finally {
-      await browser.close();
-    }
+  private async refreshHttpSession(lock: CanvasTokenLock): Promise<void> {
+    const session = new HttpSession();
+    await session.login(this.username, this.credentialFactory);
+    await lock.assertOwned();
+    await writeSessionToKeychain(this.username, session.storageState());
   }
 
   private async withAuthenticatedContext<T>(
@@ -1212,7 +993,7 @@ export class BrowserSession {
             await withCanvasTokenLock(this.username, async (lock) => {
               await lock.assertOwned();
               await deleteSessionFromKeychain(this.username);
-              await this.refreshBrowserSession(lock);
+              await this.refreshHttpSession(lock);
             });
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             cachedSessionState = await readSessionFromKeychain(this.username) ?? undefined;
@@ -1244,97 +1025,36 @@ export class BrowserSession {
     return this.withAuthenticatedContext(label, {}, fn);
   }
 
-  /**
-   * mportal2 ajax POST (JSON). 인증 컨텍스트의 세션 쿠키 사용.
-   *
-   * mportal2 ajax는 SSO 세션(JSESSIONID)이 컨텍스트에 확립돼 있어야 JSON을 준다.
-   * 캐시된 eclass storageState에는 `ssotoken`만 있고 mportal2 JSESSIONID는 없으므로,
-   * POST 전에 mportal2 포털 페이지를 1회 navigate해 SSO interlock가 자동 로그인하며
-   * JSESSIONID를 세팅하게 한다(미실시 시 ajax가 HTML 로그인 페이지를 반환해 JSON 파싱 실패).
-   * eclass 세션 만료로 실제 로그인 페이지로 튕기면 SESSION_REDIRECT로 재로그인 후 1회 재시도.
-   */
+  /** Authenticated mportal JSON requests share the account's HTTP cookie state. */
   async mportalPostJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    await this.ensurePlaywrightReady();
-    await this.getClient();
-    const url = `https://mportal2.cau.ac.kr${path}`;
-    const warmupUrl = 'https://mportal2.cau.ac.kr/std/usk/sUskSif002/index.do?type=1';
-    assertAllowedOrigin(url, 'mportalPostJson');
-    return this.withAuthenticatedContext('mportal post', {}, async (context) => {
-      const page = await context.newPage();
-      try {
-        await page.goto(warmupUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        if (isSsoLoginUrl(page.url())) {
-          throw sessionRedirectError(page.url());
+    if (!/^\/std\/usk\/sUskSif002\/(selectCurYear|selectList)\.ajax$/.test(path)) throw new Error('Invalid mportal endpoint');
+    return withCanvasTokenLock(this.username, async (lock) => {
+      let session = new HttpSession(await readSessionFromKeychain(this.username));
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!await session.authenticated()) {
+          session = new HttpSession();
+          await session.login(this.username, this.credentialFactory);
         }
-      } finally {
-        await page.close();
+        const warmup = await session.html('https://mportal2.cau.ac.kr/std/usk/sUskSif002/index.do?type=1');
+        if (!warmup.ok || isSsoLoginUrl(warmup.url) || warmup.text.includes('login_user_password')) {
+          if (attempt === 0) { session = new HttpSession(); continue; }
+          throw new SessionExpiredError();
+        }
+        const response = await session.request(`https://mportal2.cau.ac.kr${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body),
+        }, false);
+        if (response.status === 401 || response.status === 403 || response.status >= 300 && response.status < 400 || response.text.trimStart().startsWith('<')) {
+          if (attempt === 0) { session = new HttpSession(); continue; }
+          throw new SessionExpiredError();
+        }
+        if (!response.ok) throw new Error(`mportal request failed (${response.status})`);
+        let parsed: T;
+        try { parsed = JSON.parse(response.text) as T; } catch { throw new Error('Invalid mportal JSON response'); }
+        await lock.assertOwned();
+        await writeSessionToKeychain(this.username, session.storageState());
+        return parsed;
       }
-      const res = await context.request.post(url, {
-        data: body,
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (!res.ok()) throw new Error(`mportal ${path} failed ${res.status()}`);
-      return await res.json() as T;
-    });
-  }
-
-  /** OZ HTML5 뷰어의 저장 다이얼로그를 열고 PDF export 다운로드를 받아 buffer로 반환. */
-  async fetchOzPdf(viewerUrl: string, _postParams: Record<string, string>): Promise<Buffer> {
-    await this.ensurePlaywrightReady();
-    await this.getClient();
-    assertAllowedOrigin(viewerUrl, 'fetchOzPdf');
-    const warmupUrl = 'https://mportal2.cau.ac.kr/std/usk/sUskSif002/index.do?type=1';
-    return this.withAuthenticatedContext('oz pdf', { acceptDownloads: true }, async (context) => {
-      const warmupPage = await context.newPage();
-      try {
-        await warmupPage.goto(warmupUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        if (isSsoLoginUrl(warmupPage.url())) {
-          throw sessionRedirectError(warmupPage.url());
-        }
-      } finally {
-        await warmupPage.close();
-      }
-
-      const page = await context.newPage();
-      try {
-        await page.goto(viewerUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        if (isSsoLoginUrl(page.url())) {
-          throw sessionRedirectError(page.url());
-        }
-        await page.waitForFunction(() => {
-          const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
-          const ozWindow = window as unknown as { getOZMovie?: unknown };
-          return Boolean(canvas?.width && canvas.height && typeof ozWindow.getOZMovie === 'function');
-        }, { timeout: 30000 });
-        await page.waitForTimeout(1500);
-
-        await page.evaluate(`(function () {
-          var movie = window.getOZMovie && window.getOZMovie('OZViewer');
-          if (!movie || typeof movie.Script !== 'function') {
-            throw new Error('OZ viewer Script API unavailable');
-          }
-          movie.Script('save');
-        })()`);
-
-        const dialog = page.locator('.ui-dialog').filter({ hasText: '저장' }).last();
-        await dialog.waitFor({ state: 'visible', timeout: 15000 });
-        await dialog.locator('select').last().selectOption('Adobe PDF File(*.pdf)');
-
-        const downloadPromise = page.waitForEvent('download', { timeout: 45000 });
-        await dialog.getByRole('button', { name: '확인' }).click();
-        const download = await downloadPromise;
-        const pdfPath = await download.path();
-        if (!pdfPath) {
-          throw new Error('OZ PDF download did not produce a readable local path');
-        }
-        const pdf = await fs.readFile(pdfPath);
-        if (pdf.subarray(0, 4).toString('latin1') !== '%PDF') {
-          throw new Error(`OZ export returned non-PDF download: ${download.suggestedFilename()}`);
-        }
-        return pdf;
-      } finally {
-        await page.close().catch(() => undefined);
-      }
+      throw new SessionExpiredError();
     });
   }
 

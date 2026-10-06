@@ -375,13 +375,13 @@ export async function fetchEclassDocument(
 
   if (parsed.kind === 'syllabus' && parsed.parts.length >= 4) {
     const [year, term, sbjtno1, clssno1] = parsed.parts;
-    const result = await getSyllabus(context.session, {
+    const result = await getSyllabus({
       year,
       term,
       sbjtno1,
       clssno1,
-      campcd: parsed.params.get('campcd') ?? undefined,
-      sust: parsed.params.get('sust') ?? undefined,
+      campcd: parsed.params.get('campcd') ?? '',
+      sust: parsed.params.get('sust') ?? '',
     });
     return {
       id,

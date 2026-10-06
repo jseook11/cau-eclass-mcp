@@ -254,18 +254,18 @@ test('resolveLaunchFromContext accepts a LearningX board attachment', async () =
     resolveBoardAttachment: async () => {
       return {
         kind: 'file',
-        url: 'https://eclass3.cau.ac.kr/files/10683786/download?verifier=redacted',
+        url: 'https://eclass3.cau.ac.kr/files/12345/download?verifier=redacted',
         type: 'pdf',
-        filename: '2026-02, 01.pdf',
+        filename: 'synthetic file.pdf',
       };
     },
   });
 
   assert.deepEqual(artifact, {
     kind: 'file',
-    url: 'https://eclass3.cau.ac.kr/files/10683786/download?verifier=redacted',
+    url: 'https://eclass3.cau.ac.kr/files/12345/download?verifier=redacted',
     type: 'pdf',
-    filename: '2026-02, 01.pdf',
+    filename: 'synthetic file.pdf',
   });
 });
 
@@ -286,7 +286,7 @@ test('resolveLaunchFromContext retries while a LearningX board is still loading'
       if (!boardLoaded) return undefined;
       return {
         kind: 'file',
-        url: 'https://eclass3.cau.ac.kr/files/10683786/download',
+        url: 'https://eclass3.cau.ac.kr/files/12345/download',
         type: 'pdf',
         filename: 'late.pdf',
       };
@@ -297,6 +297,6 @@ test('resolveLaunchFromContext retries while a LearningX board is still loading'
   });
 
   assert.equal(artifact.kind, 'file');
-  assert.equal(artifact.url, 'https://eclass3.cau.ac.kr/files/10683786/download');
+  assert.equal(artifact.url, 'https://eclass3.cau.ac.kr/files/12345/download');
   assert.equal(artifact.filename, 'late.pdf');
 });

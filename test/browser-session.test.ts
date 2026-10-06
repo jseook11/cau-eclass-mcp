@@ -1,21 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { Page } from 'playwright';
 
 import {
   buildCanvasTokenCompensationRetentionError,
   buildCanvasTokenRecoveryManualCleanupError,
   buildOcsCaptureFailureMessage,
-  createCanvasTokenFromAuthenticatedPage,
   isSsoLoginUrl,
-  listCanvasTokensFromAuthenticatedPage,
   parseCachedSessionCredential,
   parseLearningxBoardLocation,
   parseLearningxBoardPostAttachment,
   redactBrowserDiagnostic,
-  revokeCanvasTokenFromAuthenticatedPage,
 } from '../src/browser-session.js';
-import { CANVAS_JSON_ACCEPT } from '../src/canvas-token-lifecycle.js';
 
 test('LearningX board location parser accepts list and post-detail routes only', () => {
   assert.deepEqual(
@@ -36,13 +31,13 @@ test('LearningX board post parser selects a valid same-origin Canvas attachment'
   assert.deepEqual(parseLearningxBoardPostAttachment({
     attachments: [
       { filename: 'bad.pdf', url: 'https://attacker.example/files/1/download', canvas_file_id: 1 },
-      { filename: '  2026-02, 01.pdf  ', url: '/files/10683786/download?verifier=redacted' },
+      { filename: '  synthetic file.pdf  ', url: '/files/12345/download?verifier=redacted' },
     ],
   }), {
     kind: 'file',
-    url: 'https://eclass3.cau.ac.kr/files/10683786/download?verifier=redacted',
+    url: 'https://eclass3.cau.ac.kr/files/12345/download?verifier=redacted',
     type: 'pdf',
-    filename: '2026-02, 01.pdf',
+    filename: 'synthetic file.pdf',
   });
 });
 
@@ -52,86 +47,6 @@ test('LearningX board post parser rejects malformed attachment payloads', () => 
   assert.equal(parseLearningxBoardPostAttachment({
     attachments: [{ filename: 'missing-file-id.pdf', url: '/courses/1' }],
   }), null);
-});
-
-test('browser token creation submits relative and absolute CAU profile form actions', async () => {
-  const baseUrl = 'https://eclass3.cau.ac.kr';
-  let formAction = `${baseUrl}/profile/tokens`;
-  const runtime = globalThis as unknown as Record<string, unknown>;
-  const previousWindow = runtime.window;
-  const previousDocument = runtime.document;
-  const previousFetch = globalThis.fetch;
-  const calls: Array<{ input: string; init: RequestInit | undefined }> = [];
-  const tokenForm = {
-    get action() {
-      return new URL(formAction, baseUrl).toString();
-    },
-    getAttribute: (name: string) => name === 'action' ? formAction : null,
-    querySelector: (selector: string) =>
-      selector === 'input[name="authenticity_token"]'
-        ? { value: 'rails-authenticity-token' }
-        : null,
-  };
-  runtime.window = { location: { origin: baseUrl, href: `${baseUrl}/profile/settings` } };
-  runtime.document = {
-    querySelector: (selector: string) =>
-      selector === 'form[action$="/profile/tokens"]' ? tokenForm : null,
-  };
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    calls.push({ input: String(input), init });
-    return {
-      ok: true,
-      status: 200,
-      url: new URL(String(input), baseUrl).toString(),
-      text: async () => JSON.stringify({ id: 'new-id', token: 'new-secret' }),
-    } as Response;
-  }) as typeof fetch;
-  const page = {
-    url: () => `${baseUrl}/profile/settings`,
-    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => fn(arg),
-  } as unknown as Page;
-
-  try {
-    const result = await createCanvasTokenFromAuthenticatedPage(
-      page,
-      '2026-10-11T00:00:00.000Z',
-      'eclass-mcp test purpose',
-    );
-
-    assert.equal(result.ok, true);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].input, formAction);
-    assert.equal(calls[0].init?.method, 'POST');
-    assert.equal(calls[0].init?.credentials, 'same-origin');
-    assert.equal(calls[0].init?.redirect, 'error');
-    assert.equal(
-      new Headers(calls[0].init?.headers).get('Content-Type'),
-      'application/x-www-form-urlencoded;charset=UTF-8',
-    );
-    assert.deepEqual(
-      Object.fromEntries(new URLSearchParams(String(calls[0].init?.body))),
-      {
-        authenticity_token: 'rails-authenticity-token',
-        'access_token[purpose]': 'eclass-mcp test purpose',
-        'access_token[expires_at]': '2026-10-11T00:00:00.000Z',
-      },
-    );
-
-    formAction = '/profile/tokens';
-    await createCanvasTokenFromAuthenticatedPage(
-      page,
-      '2026-10-12T00:00:00.000Z',
-      'eclass-mcp relative action',
-    );
-    assert.equal(calls.length, 2);
-    assert.equal(calls[1].input, `${baseUrl}/profile/tokens`);
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousWindow === undefined) delete runtime.window;
-    else runtime.window = previousWindow;
-    if (previousDocument === undefined) delete runtime.document;
-    else runtime.document = previousDocument;
-  }
 });
 
 test('SSO login URL detection includes the mportal authentication boundary', () => {
@@ -151,66 +66,6 @@ test('SSO login URL detection includes the mportal authentication boundary', () 
     isSsoLoginUrl('https://example.com/common/auth/newSsoLogin.do'),
     false,
   );
-});
-
-test('browser token recovery list/revoke calls are bounded and same-origin', async () => {
-  const baseUrl = 'https://eclass3.cau.ac.kr';
-  const runtime = globalThis as unknown as Record<string, unknown>;
-  const previousWindow = runtime.window;
-  const previousDocument = runtime.document;
-  const previousFetch = globalThis.fetch;
-  const calls: Array<{ input: string; init: RequestInit | undefined }> = [];
-  runtime.window = { location: { origin: baseUrl } };
-  runtime.document = { querySelector: () => null };
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    calls.push({ input: String(input), init });
-    const isDelete = init?.method === 'DELETE';
-    return {
-      ok: true,
-      status: isDelete ? 204 : 200,
-      url: `${baseUrl}${String(input)}`,
-      text: async () => isDelete ? '' : JSON.stringify([{ id: 'listed-id' }]),
-    } as Response;
-  }) as typeof fetch;
-  const page = {
-    url: () => `${baseUrl}/profile/settings`,
-    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => fn(arg),
-  } as unknown as Page;
-
-  try {
-    assert.deepEqual(await listCanvasTokensFromAuthenticatedPage(page), [{ id: 'listed-id' }]);
-    assert.equal(
-      await revokeCanvasTokenFromAuthenticatedPage(page, { id: 'old/id' }),
-      true,
-    );
-
-    assert.equal(calls[0].input, '/api/v1/users/self/user_generated_tokens?per_page=100');
-    assert.equal(calls[0].init?.method, 'GET');
-    assert.equal(calls[0].init?.redirect, 'error');
-    assert.equal(calls[0].init?.credentials, 'same-origin');
-    assert.equal(new Headers(calls[0].init?.headers).get('Accept'), CANVAS_JSON_ACCEPT);
-    assert.ok(calls[0].init?.signal instanceof AbortSignal);
-    assert.equal(calls[1].input, '/api/v1/users/self/tokens/old%2Fid');
-    assert.equal(calls[1].init?.method, 'DELETE');
-    assert.equal(calls[1].init?.redirect, 'error');
-    assert.equal(calls[1].init?.credentials, 'same-origin');
-    assert.equal(new Headers(calls[1].init?.headers).get('Accept'), CANVAS_JSON_ACCEPT);
-    assert.ok(calls[1].init?.signal instanceof AbortSignal);
-
-    const crossOriginPage = {
-      url: () => 'https://attacker.example/profile/settings',
-    } as unknown as Page;
-    await assert.rejects(
-      () => listCanvasTokensFromAuthenticatedPage(crossOriginPage),
-      Error,
-    );
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousWindow === undefined) delete runtime.window;
-    else runtime.window = previousWindow;
-    if (previousDocument === undefined) delete runtime.document;
-    else runtime.document = previousDocument;
-  }
 });
 
 test('failed compensation retention preserves causes without exposing secrets', () => {
