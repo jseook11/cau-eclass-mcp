@@ -9,7 +9,7 @@ export async function resolveMaterial(
   const fileId = input.id ?? input.file_id!;
   const fingerprint = materialFingerprint(input);
   const previous = cache?.getMaterialResolution?.(courseId, fileId, fingerprint);
-  if (previous && !previous.retryable) return previous;
+  if (previous && !previous.retryable && previous.acquisition_policy !== 'not_open') return previous;
   let result: MaterialResolution;
   try {
     const artifact = await session.resolveExternalToolLaunch(courseId, input.url!);
@@ -21,7 +21,7 @@ export async function resolveMaterial(
   } catch (err) {
     const error = acquisitionError(err);
     result = {
-      asset_kind: 'unresolved', downloadable: false, acquisition_policy: 'needs_resolution',
+      asset_kind: 'unresolved', downloadable: false, acquisition_policy: error.code === 'MATERIAL_NOT_OPEN' ? 'not_open' : 'needs_resolution',
       resolution_reason: error.code, course_id: courseId, file_id: fileId, fingerprint,
       error_code: error.code, reason: error.reason, retryable: error.retryable,
       observed_at: new Date().toISOString(),

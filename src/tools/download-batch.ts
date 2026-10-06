@@ -20,7 +20,7 @@ export interface BatchDownloadResult {
  * Downloads a list of materials, one at a time, with partial success. With
  * continueOnError=false, stops at the first failure (already-finished results
  * are still returned). Downloads are sequential to avoid hammering eclass and
- * to keep the single shared Playwright session well-behaved.
+ * to keep the shared HTTP session well-behaved.
  */
 export async function downloadMaterialsBatch(
   deps: DownloadDeps,

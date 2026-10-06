@@ -39,7 +39,7 @@ test('renderMarkdown shows grades section when present', () => {
   assert.ok(md.includes('85'));
 });
 
-// Stubs for the orchestrator. Canvas calls return empty; Playwright-backed
+// Stubs for the orchestrator. Canvas calls return empty; HTTP
 // material sources throw → captured as partial failures (not a hard error).
 function makeClient(): any {
   return {
@@ -51,8 +51,8 @@ function makeClient(): any {
 
 function makeSession(): any {
   return {
-    async interceptCourseresource(): Promise<never> { throw new Error('playwright down'); },
-    async interceptModulebuilder(): Promise<never> { throw new Error('playwright down'); },
+    async fetchCourseresources(): Promise<never> { throw new Error('LearningX unavailable'); },
+    async fetchModulebuilder(): Promise<never> { throw new Error('LearningX unavailable'); },
   };
 }
 
@@ -88,7 +88,7 @@ test('exportCourseSnapshot preserves announcement and merged attachment provenan
     client: { ...makeClient(), fetchAll: async (requestPath: string) => requestPath.includes('/discussion_topics') ? [{
       id: 20, title: '강의자료 안내', attachments: [{ id: 55, display_name: 'slides.pdf', url: attachmentUrl, 'content-type': 'application/pdf' }],
     }] : [] },
-    session: { ...makeSession(), interceptCourseresource: async () => [{ id: 'resource-1', title: 'slides.pdf', type: 'pdf', url: attachmentUrl }] },
+    session: { ...makeSession(), fetchCourseresources: async () => [{ id: 'resource-1', title: 'slides.pdf', type: 'pdf', url: attachmentUrl }] },
     fileCache: { ...makeFileCache(), get: () => null },
   };
   try {

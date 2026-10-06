@@ -15,7 +15,7 @@ eclass의 비표준 엔드포인트를 파악할 때 쓰는 개발용 도구. MC
   - URL 쿼리: token/session/sig/verifier 등 민감 파라미터 값 마스킹
   - 요청 바디: 필드 **이름만** 기록, 값은 절대 기록 안 함
 - `submit-flow` 레코더는 제출 버튼을 절대 클릭하지 않는다. 폼을 여는 표준 링크(`.submit_assignment_link`)만 클릭.
-- 캡처 대상 origin은 eclass3/ocs/canvas.cau.ac.kr로 제한.
+- 캡처 대상 origin은 eclass3/ocs/canvas/mportal2/rpt80.cau.ac.kr로 제한.
 
 ## 자격증명 설정 (개발용)
 
@@ -45,7 +45,7 @@ eclass의 비표준 엔드포인트를 파악할 때 쓰는 개발용 도구. MC
 pnpm run discover api /api/v1/users/self
 pnpm run discover api "/api/v1/courses?enrollment_state=active&include[]=total_scores"
 
-# 2. 페이지 로드하며 네트워크 캡처 — API로 안 되는 흐름의 실제 엔드포인트 파악
+# 2. HTTP 페이지의 폼·iframe·script 주소 확인
 pnpm run discover page "https://eclass3.cau.ac.kr/courses/12345/grades"
 
 # 3. 과제 제출 플로우 dry-run 레코더 — 제출 UI를 열고 폼 구조·네트워크만 기록 (제출 안 함)
@@ -55,7 +55,7 @@ pnpm run discover submit-flow 12345 67890
 출력은 모두 redact된 JSON (stdout).
 
 - `api`: `{ path, status, content_type, body_preview, body_truncated }`
-- `page`: `{ final_page_url, page_title, endpoint_candidates, entries, dropped_entries }`
+- `page`: `{ requested_url, final_page_url, status, content_type, locators }`
 - `submit-flow`: `{ opened_submission_ui, forms: [{ action, method, fields, submit_buttons }], endpoint_candidates, notes }`
 
 `endpoint_candidates`는 캡처된 요청을 `METHOD origin/path_pattern`으로 그룹화한 요약
@@ -68,23 +68,17 @@ pnpm run discover submit-flow 12345 67890
 | `src/discovery/redact.ts` | `redactHeaders` / `redactUrl` / `summarizeBody` — 순수 함수 |
 | `src/discovery/network-capture.ts` | `NetworkRecorder` (Page/Context에 attach), `summarizeEndpointCandidates`. Playwright 구조적 타입(`RequestLike` 등)을 써서 스텁으로 테스트 가능 |
 | `src/discovery/submit-flow-recorder.ts` | `recordAssignmentSubmitFlow(session, courseId, assignmentId)` — dry-run 전용 |
-| `src/browser-session.ts` | `BrowserSession.withDiscoveryContext(label, fn)` — 인증된 브라우저 컨텍스트 제공 (세션 만료 시 자동 재로그인 포함) |
+| `src/browser-session.ts` | `withHttpSession(fn)` — HTTP 페이지 탐사. `withSubmissionContext(label, fn)` — 제출 폼 탐사 |
 | `scripts/discover.ts` | CLI 진입점 |
 
 ## 코드에서 쓰는 법
 
 ```ts
-const report = await session.withDiscoveryContext('my discovery', async (context) => {
-  const page = await context.newPage();
-  const recorder = new NetworkRecorder();
-  recorder.attach(page);
-  await page.goto(url, { waitUntil: 'networkidle' });
-  if (isSsoLoginUrl(page.url())) throw new Error(`SESSION_REDIRECT:${page.url()}`);
-  return { candidates: recorder.summarize(), entries: recorder.entries() };
-});
+const page = await session.withHttpSession(http => http.html(url));
 ```
 
-`SESSION_REDIRECT:` 접두사 에러를 던지면 `withDiscoveryContext`가 재로그인 후 1회 재시도한다.
+자료 경로의 구성·엔드포인트·검증 명령은 [HTTP-MATERIALS.md](HTTP-MATERIALS.md)에 있다.
+과제 제출 폼은 `recordAssignmentSubmitFlow()`로 탐사한다.
 
 ## 테스트
 

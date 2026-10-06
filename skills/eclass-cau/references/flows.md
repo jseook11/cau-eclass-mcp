@@ -14,8 +14,8 @@
    실제로 보이거나 사용자가 명시적으로 요청한 경우에만 별도로 마지막 확인한다
    (`sources: ["files"]`).
 4. `is_downloaded: false`인 항목을 `eclass_download_materials_batch`에 넘긴다. `file_id`←`id`,
-   `display_name`←`title`과 함께 `type`·`is_playwright_required`(있으면 `is_playright_required`
-   별칭)도 그대로 넘긴다. ExternalTool 래퍼를 Canvas 파일 URL처럼 보내면 슬라이드 본문을
+   `display_name`←`title`과 함께 `url`·`type`·획득 정책·잠금 필드도 그대로 넘긴다.
+   `type: ExternalTool`은 LTI 런치를 선택하며, 별도 래퍼는 `requires_launch: true`로 표시한다. ExternalTool 래퍼를 Canvas 파일 URL처럼 보내면 슬라이드 본문을
    못 연다. 영상 항목은 배치가 거부·안내하므로 "동영상 다운로드" 흐름으로 받는다. (C2, C4)
 
 ## 동영상 다운로드

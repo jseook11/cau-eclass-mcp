@@ -4,7 +4,7 @@ import { FileCache } from '../file-cache.js';
 import type { ResolvedLocator } from '../file-cache.js';
 import {
   resolveDownloadStrategy,
-  isPlaywrightStrategy,
+  isResolvedHttpStrategy,
   type DownloadStrategy,
 } from '../download-strategy.js';
 import { downloadFileToDisk, validateCachedDownload } from './download-file.js';
@@ -24,6 +24,7 @@ export interface DownloadItem extends Partial<MaterialAcquisition> {
   display_name: string;
   type?: string | null;
   source?: string | null;
+  requires_launch?: boolean;
   is_playwright_required?: boolean;
   is_playright_required?: boolean;
   external_url?: string | null;
@@ -155,18 +156,19 @@ async function downloadResolved(
     resolvedType,
     false,
   );
+  if (transport === 'missing_locator') throw new AcquisitionError('MATERIAL_MISSING_LOCATOR', 'Material has no download locator', false);
   if (transport === 'unsupported_streaming_media') {
     throw new Error(
       `파일 다운로드 도구는 동영상/스트리밍 자료를 처리하지 않습니다. OCS MP4 동영상은 eclass_download_video를 사용하세요: type=${resolvedType ?? ''}`,
     );
   }
-  if (isPlaywrightStrategy(transport) && transport !== 'external_tool_launch') {
+  if (isResolvedHttpStrategy(transport) && transport !== 'external_tool_launch') {
     const localPath = await deps.session.downloadCourseresourceFile(
       item.course_id,
       item.file_id,
       safeName,
       getDownloadDir(),
-      transport === 'ocs_intercept' ? resolvedUrl : undefined,
+      transport === 'ocs_http' ? resolvedUrl : undefined,
     );
     const stat = await fs.stat(localPath);
     return { localPath, sizeBytes: stat.size };
@@ -177,7 +179,7 @@ async function downloadResolved(
 
 /**
  * Unified single-material download. Validates the cache, resolves the transport
- * strategy, dispatches to the direct-fetch or Playwright path, records the
+ * strategy, dispatches to the corresponding HTTP path, records the
  * result with its source, and returns a structured outcome. Never throws for
  * expected failures or exclusions. Only actual failures use status 'failed'.
  */
@@ -234,15 +236,7 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
 
     if (strategy === 'external_tool_launch') {
       if (!item.url) {
-        if (item.type === 'ExternalTool') return excluded(item, strategy, 'needs_resolution', 'external_tool_url_missing', 'EXTERNAL_TOOL_URL_MISSING');
-        localPath = await deps.session.downloadCourseresourceFile(
-          item.course_id,
-          item.file_id,
-          safeName,
-          getDownloadDir(),
-        );
-        const stat = await fs.stat(localPath);
-        sizeBytes = stat.size;
+        return excluded(item, strategy, 'needs_resolution', 'external_tool_url_missing', 'EXTERNAL_TOOL_URL_MISSING');
       } else {
         const locator = await resolveExternalToolLocator(deps, item);
         const resolvedDisplayName = locator.display_name?.trim() || item.display_name;
@@ -258,13 +252,15 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
         localPath = downloaded.localPath;
         sizeBytes = downloaded.sizeBytes;
       }
-    } else if (isPlaywrightStrategy(strategy)) {
+    } else if (strategy === 'missing_locator') {
+      throw new AcquisitionError('MATERIAL_MISSING_LOCATOR', 'Material has no download locator', false);
+    } else if (isResolvedHttpStrategy(strategy)) {
       localPath = await deps.session.downloadCourseresourceFile(
         item.course_id,
         item.file_id,
         safeName,
         getDownloadDir(),
-        strategy === 'ocs_intercept' ? item.url! : undefined,
+        strategy === 'ocs_http' ? item.url! : undefined,
       );
       const stat = await fs.stat(localPath);
       sizeBytes = stat.size;
@@ -294,6 +290,7 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
     };
   } catch (err) {
     const error = acquisitionError(err);
+    if (error.code === 'MATERIAL_NOT_OPEN') return excluded(item, strategy, 'not_open', error.reason, error.code);
     if (error.code === 'EXTERNAL_TOOL_NO_ARTIFACT') return excluded(item, strategy, 'needs_resolution', error.reason, error.code);
     if (error.code === 'EXTERNAL_TOOL_VIDEO') return excluded(item, strategy, 'excluded_video', error.reason, error.code);
     return failed(item, strategy, error.code, error.reason, error.retryable);

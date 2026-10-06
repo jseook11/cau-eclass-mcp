@@ -1,3 +1,4 @@
+import { isStreamingMediaType } from './media-types.js';
 import { createHash } from 'node:crypto';
 import { sanitizeDebug, isRetryableReason } from './errors.js';
 import type { LaunchArtifact } from './external-tool-launch.js';
@@ -27,13 +28,12 @@ export interface AcquisitionInput {
 }
 
 const documentTypes = new Set(['file', 'pdf', 'ppt', 'pptx', 'doc', 'docx', 'xls', 'xlsx', 'hwp', 'hwpx', 'zip', 'txt', 'image', 'png', 'jpg', 'jpeg', 'gif']);
-const videoTypes = new Set(['video', 'movie', 'mp4', 'm3u8', 'hls', 'dash', 'mpd', 'webm', 'mov', 'm4v', 'avi', 'wmv', 'media', 'stream', 'streaming', 'vod']);
 
 export function classifyMaterial(input: AcquisitionInput, now = Date.now()): MaterialAcquisition {
   const type = (input.type ?? '').trim().toLowerCase().split(';')[0];
   let kind: AssetKind = 'unresolved';
   let reason = 'semantic_type_unknown';
-  if (videoTypes.has(type) || type.startsWith('video/') || /mpegurl|dash\+xml/.test(type)) {
+  if (isStreamingMediaType(type)) {
     kind = 'video'; reason = 'explicit_video_type';
   } else if (documentTypes.has(type) || /^(application\/(pdf|zip|octet-stream|msword|vnd\.(ms-|openxmlformats|hancom))|image\/|text\/plain)/.test(type)) {
     kind = 'document'; reason = 'explicit_file_type';
@@ -47,7 +47,7 @@ export function classifyMaterial(input: AcquisitionInput, now = Date.now()): Mat
     try {
       const target = new URL(input.external_url);
       const ext = target.pathname.match(/\.([a-z0-9]+)$/i)?.[1].toLowerCase();
-      if (ext && videoTypes.has(ext)) { kind = 'video'; reason = 'external_video_url'; }
+      if (ext && isStreamingMediaType(ext)) { kind = 'video'; reason = 'external_video_url'; }
       else if (ext && documentTypes.has(ext)) { kind = 'document'; reason = 'external_file_url'; }
       else if (target.hostname === 'eclass3.cau.ac.kr' && /\/files\/\d+(?:\/download)?\/?$/.test(target.pathname)) {
         kind = 'document'; reason = 'canvas_file_target';
@@ -67,6 +67,8 @@ export function classifyMaterial(input: AcquisitionInput, now = Date.now()): Mat
 export function classifyLaunchArtifact(artifact: LaunchArtifact): MaterialAcquisition {
   if (artifact.kind === 'video') return { asset_kind: 'video', downloadable: false, acquisition_policy: 'exclude', resolution_reason: 'launch_video' };
   if (artifact.kind === 'file') return { asset_kind: 'document', downloadable: true, acquisition_policy: 'download', resolution_reason: 'launch_file' };
+  const content = classifyMaterial({ type: artifact.type });
+  if (content.asset_kind === 'document') return { ...content, resolution_reason: 'launch_ocs_document' };
   // /em/<id> is shared by slide viewers and video players.
   return { asset_kind: 'unresolved', downloadable: false, acquisition_policy: 'needs_resolution', resolution_reason: 'ocs_viewer_type_unknown' };
 }

@@ -27,15 +27,15 @@
 | `display_name` | `material.title` | ● |
 | `url` | `material.url` | C3 참조 |
 | `type` | `material.type` | 선택. `ExternalTool`이면 그대로 넘겨야 LTI 런치로 분류된다 |
-| `is_playwright_required` | `material.is_playwright_required` | ExternalTool/래퍼면 ● (같이 넘기지 않으면 eclass3 호스트가 `canvas_file`로 오인될 수 있음) |
-| `is_playright_required` | `material.is_playright_required` | 선택(오탈자 별칭, 둘 중 하나면 런치) |
+| `requires_launch` | 런치 해석이 필요한 래퍼임을 알고 있을 때 `true` | 선택. `type: ExternalTool`이면 타입으로 런치를 선택한다 |
 | `source` | `material.source` | 선택(넘기면 검색 캐시에 기록) |
 | `course_id` | 흐름의 course_id (C1) | ● |
 
 ## C3 — url 필수 여부 (파일 vs 영상)
 
-- `eclass_download_file` / `eclass_download_materials_batch`: `url`은 선택이며 null
-  가능(courseresource는 Playwright 경로).
+- `eclass_download_file` / `eclass_download_materials_batch`: 단일 도구의 `url`은 필수이며 null을 허용하고, 배치에서는 선택이다.
+  실제 다운로드에는 직접 파일·OCS 뷰어·ExternalTool 래퍼 URL이 필요하다.
+  locator가 없으면 실패 또는 `needs_resolution`을 반환한다.
 - `eclass_download_video`: `url` **필수, null 불가**. `video_id`·`display_name`도 필수.
 
 ## C4 — 영상 라우팅은 서버에 맡긴다

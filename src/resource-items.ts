@@ -7,8 +7,7 @@ import { debugLog } from './secrets.js';
  * handful of common top-level collection keys.
  *
  * strict: throw on an unrecognized shape instead of returning [] — the API
- * caller treats that as a fetch failure and falls back to the Playwright
- * intercept, rather than silently reporting zero materials.
+ * caller reports a source failure instead of silently returning zero materials.
  */
 export function parseResourceItems(body: unknown, options: { strict?: boolean } = {}): ResourceItem[] {
   if (Array.isArray(body)) {

@@ -35,7 +35,7 @@ test('downloadMaterialsBatch handles mixed strategies with partial success', asy
 
   const fileCache = makeFileCache();
 
-  // Fake session: write a real file so fs.stat succeeds on the playwright path.
+  // Fake session: write a real file so fs.stat succeeds on the HTTP path.
   const session = {
     async downloadCourseresourceFile(courseId: number, _id: string, safeName: string): Promise<string> {
       const dir = path.join(tempDir, String(courseId));
@@ -64,7 +64,7 @@ test('downloadMaterialsBatch handles mixed strategies with partial success', asy
     const byId = Object.fromEntries(result.results.map((r) => [r.file_id, r]));
     assert.equal(byId['f1'].strategy, 'canvas_file');
     assert.equal(byId['f1'].status, 'downloaded');
-    assert.equal(byId['f2'].strategy, 'ocs_intercept');
+    assert.equal(byId['f2'].strategy, 'ocs_http');
     assert.equal(byId['f2'].status, 'downloaded');
     assert.equal(byId['f3'].strategy, 'unsupported_streaming_media');
     assert.equal(byId['f3'].status, 'excluded_video');

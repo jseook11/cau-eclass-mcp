@@ -29,7 +29,7 @@
 }
 ```
 
-필요할 때 `eclass_get_materials({ course_id, sources: ["external"], resolve_external: true })`로 미확인 래퍼의 LTI launch를 확인할 수 있다. 확인된 파일 응답/첨부는 문서, video DOM 또는 영상/스트리밍 응답은 영상으로 판정한다. 파일을 디스크에 저장하거나 영상 재생 완료를 기다리지 않는다. Viewer만 확인되면 `ocs_viewer_type_unknown`으로 남긴다.
+필요할 때 `eclass_get_materials({ course_id, sources: ["external"], resolve_external: true })`로 미확인 래퍼의 LTI launch를 확인할 수 있다. 확인된 파일 응답/첨부는 문서로, OCS 메타데이터의 `content_type`(예: `movie`, `everlec`)이나 영상/스트리밍 MIME 응답은 영상으로 판정한다. 파일을 디스크에 저장하거나 영상 재생 완료를 기다리지 않는다. `content_type=sharedocs` 뷰어는 원본 문서, 구형 type-17 File 뷰어는 원본 파일로 해석하고, 그 밖에 판단할 수 없는 뷰어만 `ocs_viewer_type_unknown`으로 남긴다.
 
 `resolution_retryable`, `resolution_error_code`, `resolution_debug`는 추가 확인 결과에 붙는다. HTTP 401/429/5xx와 timeout/network 오류는 재확인 대상으로 남기고, 파일 미확인은 `EXTERNAL_TOOL_NO_ARTIFACT`로 반환한다. debug는 URL의 query/hash를 제거하고 500자로 제한한다. 자료 목록 자체의 `ok`/`errors`는 source 조회 성공 여부를 나타내며, 개별 미확인을 source 전체 실패로 집계하지 않는다.
 

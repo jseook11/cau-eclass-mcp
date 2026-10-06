@@ -157,3 +157,48 @@ test('different IDs with the same PDF title keep separate downloaded bytes', asy
     cache.getDb().close(); await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('server-observed lock remains not_open after HTTP wrapper resolution', async () => {
+  const session = {resolveExternalToolLaunch:async()=>{throw new AcquisitionError('MATERIAL_NOT_OPEN','LearningX material is not open',false);}} as unknown as BrowserSession;
+  const resolution=await resolveMaterial(session,undefined,wrapper.course_id,wrapper);
+  assert.equal(resolution.acquisition_policy,'not_open');
+  assert.equal(resolution.downloadable,false);
+  assert.equal(resolution.retryable,false);
+});
+
+test('a locked HTTP resolution is rechecked after the server opens the material', async () => {
+  let current: any;
+  let calls=0;
+  const session={resolveExternalToolLaunch:async()=>{
+    calls++;if(calls===1)throw new AcquisitionError('MATERIAL_NOT_OPEN','not open',false);
+    return {kind:'ocs_viewer',url:'https://ocs.cau.ac.kr/em/fixture',type:'pdf'};
+  }} as unknown as BrowserSession;
+  const cache={getMaterialResolution:()=>current,setMaterialResolution:(r:unknown)=>{current=r;}} as unknown as FileCache;
+  assert.equal((await resolveMaterial(session,cache,wrapper.course_id,wrapper)).acquisition_policy,'not_open');
+  const open=await resolveMaterial(session,cache,wrapper.course_id,wrapper);
+  assert.equal(calls,2);assert.equal(open.downloadable,true);assert.equal(open.acquisition_policy,'download');
+});
+
+test('download classifies a server-discovered lock as not_open without caller acquisition metadata', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'material-server-lock-'));
+  const fileCache = new FileCache(path.join(dir, 'files.db'));
+  const deps = { session: { resolveExternalToolLaunch: async () => {
+    throw new AcquisitionError('MATERIAL_NOT_OPEN', 'not open', false);
+  } }, fileCache, token: 'tok' } as unknown as DownloadDeps;
+  try {
+    const result = await downloadOne(deps, wrapper);
+    assert.equal(result.status, 'not_open');
+    assert.equal(result.error_code, 'MATERIAL_NOT_OPEN');
+    assert.equal(result.retryable, false);
+    assert.equal(result.next_action, 'wait_until_open');
+    assert.deepEqual(fileCache.list(), []);
+  } finally { fileCache.getDb().close(); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('LearningX everlec video is consistently excluded from document acquisition', async () => {
+  assert.equal(classifyMaterial({ type: ' EVERLEC ' }).asset_kind, 'video');
+  const deps = { session: {}, fileCache: {}, token: 'tok' } as unknown as DownloadDeps;
+  const result = await downloadOne(deps, { ...wrapper, type: 'everlec', url: 'https://ocs.cau.ac.kr/em/video' });
+  assert.equal(result.status, 'excluded_video');
+  assert.equal(result.strategy, 'unsupported_streaming_media');
+});

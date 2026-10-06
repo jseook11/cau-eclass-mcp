@@ -1,4 +1,4 @@
-import { isStreamingMediaType } from './browser-session.js';
+import { isStreamingMediaType } from './media-types.js';
 
 // How a material should be fetched. `already_cached` is a runtime result state
 // (decided by cache validation), not chosen by resolveDownloadStrategy.
@@ -6,8 +6,8 @@ export type DownloadStrategy =
   | 'already_cached'
   | 'canvas_file'
   | 'direct_url'
-  | 'ocs_intercept'
-  | 'playwright_ui'
+  | 'ocs_http'
+  | 'missing_locator'
   | 'external_tool_launch'
   | 'unsupported_streaming_media';
 
@@ -21,12 +21,12 @@ export const OCS_VIEWER_MARKER = 'ocs.cau.ac.kr/em/';
 export function resolveDownloadStrategy(
   url: string | null | undefined,
   type?: string | null,
-  isPlaywrightRequired?: boolean,
+  requiresLaunch?: boolean,
 ): Exclude<DownloadStrategy, 'already_cached'> {
   if (isStreamingMediaType(type)) return 'unsupported_streaming_media';
-  if (isPlaywrightRequired || type === 'ExternalTool') return 'external_tool_launch';
-  if (!url) return 'playwright_ui';
-  if (url.includes(OCS_VIEWER_MARKER)) return 'ocs_intercept';
+  if (requiresLaunch || type === 'ExternalTool') return 'external_tool_launch';
+  if (!url) return 'missing_locator';
+  if (url.includes(OCS_VIEWER_MARKER)) return 'ocs_http';
   try {
     if (new URL(url).hostname === 'eclass3.cau.ac.kr') return 'canvas_file';
   } catch {
@@ -35,8 +35,8 @@ export function resolveDownloadStrategy(
   return 'direct_url';
 }
 
-export function isPlaywrightStrategy(strategy: DownloadStrategy): boolean {
-  return strategy === 'ocs_intercept' || strategy === 'playwright_ui' || strategy === 'external_tool_launch';
+export function isResolvedHttpStrategy(strategy: DownloadStrategy): boolean {
+  return strategy === 'ocs_http' || strategy === 'external_tool_launch';
 }
 
 export function isDirectStrategy(strategy: DownloadStrategy): boolean {

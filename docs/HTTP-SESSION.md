@@ -1,7 +1,7 @@
 # HTTP 인증 세션
 
 `src/http-session.ts`가 사용자별 쿠키 저장소와 HTTP 요청을 관리한다.
-허용 호스트는 `eclass3.cau.ac.kr`, `canvas.cau.ac.kr`, `mportal2.cau.ac.kr`이다.
+허용 호스트는 `eclass3.cau.ac.kr`, `canvas.cau.ac.kr`, `mportal2.cau.ac.kr`, `ocs.cau.ac.kr`이다.
 각 응답의 Set-Cookie를 domain/path/expiry 기준으로 저장하고 리다이렉트 목적지를 검사한다.
 
 ## 로그인

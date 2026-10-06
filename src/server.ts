@@ -101,10 +101,11 @@ const GetDownloadFileSchema = z.object({
   ...AcquisitionFields,
   file_id: z.string().min(1).max(256),
   course_id: z.number().int().positive(),
-  url: z.string().url().nullable().optional(),  // null for courseresource files (Playwright download)
+  url: z.string().url().nullable().optional(),
   display_name: z.string().min(1).max(512),
   type: z.string().min(1).max(256).optional(),
   source: z.string().min(1).max(64).optional(),
+  requires_launch: z.boolean().optional(),
   is_playwright_required: z.boolean().optional(),
   is_playright_required: z.boolean().optional(),
 });
@@ -161,6 +162,7 @@ const DownloadBatchSchema = z.object({
     display_name: z.string().min(1).max(512),
     type: z.string().min(1).max(256).optional(),
     source: z.string().min(1).max(64).optional(),
+    requires_launch: z.boolean().optional(),
     is_playwright_required: z.boolean().optional(),
     is_playright_required: z.boolean().optional(),
   })).min(1).max(200),
@@ -259,7 +261,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'eclass_doctor',
-        description: '[로컬] 진단 도구. Playwright Chromium 실행 가능 여부를 빠르게 확인합니다. 다른 도구가 인증/브라우저 오류로 실패할 때 원인 파악용으로 사용하세요.',
+        description: '[로컬] 인증·Canvas API·LearningX 자료 조회·자격증명 저장소를 HTTP로 점검합니다.',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -471,7 +473,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             file_id: { type: 'string', description: 'Canvas 파일 ID' },
             course_id: { type: 'number', description: '강의 ID' },
-            url: { type: 'string', description: '다운로드 URL (courseresource 파일은 null 허용 — Playwright로 다운로드)' },
+            url: { type: ['string', 'null'], description: '파일·OCS 문서·ExternalTool URL' },
             display_name: { type: 'string', description: '저장할 파일명' },
             type: { type: 'string', description: '자료 유형. ExternalTool은 LTI 런치 후 실제 파일을 찾습니다. mp4/video/m3u8 계열은 파일 도구에서 거부되며 eclass_download_video 대상입니다.' },
             asset_kind: { type: 'string', enum: ['document', 'video', 'interactive', 'unresolved'] },
@@ -483,8 +485,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             external_url: { type: ['string', 'null'] },
             locked_for_user: { type: 'boolean' },
             unlock_at: { type: ['string', 'null'] },
-            is_playwright_required: { type: 'boolean', description: 'true면 eclass3 래퍼 URL이어도 ExternalTool LTI 런치로 처리합니다.' },
-            is_playright_required: { type: 'boolean', description: 'is_playwright_required의 이전 오탈자 별칭. 둘 중 하나면 런치 경로를 탑니다.' },
+            requires_launch: { type: 'boolean', description: 'true면 자료 URL을 HTTP LTI 런치로 해석합니다.' },
           },
           required: ['file_id', 'course_id', 'url', 'display_name'],
         },
@@ -502,7 +503,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 type: 'object',
                 properties: {
                   file_id: { type: 'string' },
-                  url: { type: 'string', description: 'null/생략 시 courseresource(Playwright) 경로' },
+                  url: { type: ['string', 'null'], description: '파일·OCS 문서·ExternalTool URL' },
                   display_name: { type: 'string' },
                   type: { type: 'string', description: 'ExternalTool이면 LTI 런치. mp4/video 계열은 excluded_video로 정상 제외되며 eclass_download_video 대상' },
                   source: { type: 'string', description: '자료 출처 (캐시에 기록됨)' },
@@ -514,8 +515,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   external_url: { type: ['string', 'null'] },
                   locked_for_user: { type: 'boolean' },
                   unlock_at: { type: ['string', 'null'] },
-                  is_playwright_required: { type: 'boolean' },
-                  is_playright_required: { type: 'boolean', description: 'is_playwright_required 오탈자 별칭' },
+                  requires_launch: { type: 'boolean' },
                 },
                 required: ['file_id', 'display_name'],
               },
@@ -844,14 +844,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           { session, fileCache, token: client.getToken() },
           parsed.course_id,
           parsed.materials.map((m) => ({
-            file_id: m.file_id,
+            ...m,
             course_id: parsed.course_id,
             url: m.url ?? null,
-            display_name: m.display_name,
-            type: m.type,
-            source: m.source,
-            is_playwright_required: m.is_playwright_required,
-            is_playright_required: m.is_playright_required,
           })),
           parsed.continue_on_error,
         );

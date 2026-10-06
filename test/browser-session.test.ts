@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   buildCanvasTokenCompensationRetentionError,
   buildCanvasTokenRecoveryManualCleanupError,
-  buildOcsCaptureFailureMessage,
   isSsoLoginUrl,
   parseCachedSessionCredential,
   parseLearningxBoardLocation,
@@ -105,20 +104,4 @@ test('browser diagnostics redact signed and session-bearing URL queries', () => 
   assert.doesNotMatch(diagnostic, /token-value|signed-value|relative-session-value/);
   assert.match(diagnostic, /page=2/);
 
-  const message = buildOcsCaptureFailureMessage({
-    resourceId: '1',
-    displayName: 'file.pdf',
-    finalPageUrl: 'https://ocs.cau.ac.kr/view?session=session-value',
-    pageTitle: 'Viewer',
-    recentFrames: ['https://ocs.cau.ac.kr/frame?verifier=verify-value'],
-    recentRequests: ['GET https://ocs.cau.ac.kr/file?access_token=request-value'],
-    recentResponses: ['302 https://ocs.cau.ac.kr/next?sig=response-value'],
-    mediaCandidates: [],
-    videoSources: [],
-    iframeSources: ['/player?token=relative-frame-token'],
-  });
-  assert.doesNotMatch(
-    message,
-    /session-value|verify-value|request-value|response-value|relative-frame-token/,
-  );
 });

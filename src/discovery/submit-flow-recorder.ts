@@ -70,7 +70,7 @@ export async function recordAssignmentSubmitFlow(
   courseId: number,
   assignmentId: number,
 ): Promise<SubmitFlowReport> {
-  return session.withDiscoveryContext('submit-flow discovery', async (context) => {
+  return session.withSubmissionContext('submit-flow discovery', async (context) => {
     const page = await context.newPage();
     const recorder = new NetworkRecorder();
     recorder.attach(page);

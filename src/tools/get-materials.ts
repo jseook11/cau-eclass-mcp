@@ -1,3 +1,4 @@
+import { isOcsViewerUrl as isVerifiedOcsViewerUrl } from '../external-tool-launch.js';
 import { CanvasApiError, CanvasClient, isCanvasPermissionDeniedError } from '../canvas-client.js';
 import { BrowserSession, isStreamingMediaType } from '../browser-session.js';
 import { FileCache } from '../file-cache.js';
@@ -40,9 +41,6 @@ export interface Material extends Partial<MaterialAcquisition> {
   resolution_error_code?: string;
   resolution_debug?: string;
   fingerprint?: string;
-  is_playwright_required?: boolean;
-  /** @deprecated typo kept for callers that still send the misspelled flag */
-  is_playright_required?: boolean;
   is_downloaded?: boolean;
   local_path?: string;
 }
@@ -181,15 +179,6 @@ function clearFilesDenial(courseId: number, cache?: FileCache): void {
   }
 }
 
-function withPlaywrightRequired(material: Material, required: boolean): Material {
-  if (!required) return material;
-  return {
-    ...material,
-    is_playwright_required: true,
-    is_playright_required: true,
-  };
-}
-
 async function fetchModules(loadModules: () => Promise<RawModule[]>): Promise<Material[]> {
   const raw = await loadModules();
   const materials: Material[] = [];
@@ -240,14 +229,13 @@ async function fetchFiles(client: CanvasClient, courseId: number, cache?: FileCa
 }
 
 async function fetchCourseresource(session: BrowserSession, courseId: number): Promise<Material[]> {
-  const items = await session.interceptCourseresource(courseId);
+  const items = await session.fetchCourseresources(courseId);
   return items.map((item) => ({
     id: item.id,
     title: item.title,
     type: item.type || 'resource',
     url: item.url,
     source: 'courseresource' as MaterialSource,
-    ...(item.url ? {} : { is_playwright_required: true, is_playright_required: true }),
   }));
 }
 
@@ -291,14 +279,14 @@ async function fetchAnnouncements(client: CanvasClient, courseId: number): Promi
 }
 
 async function fetchModulebuilder(session: BrowserSession, courseId: number): Promise<Material[]> {
-  const items = await session.interceptModulebuilder(courseId);
-  return items.map((item) => withPlaywrightRequired({
+  const items = await session.fetchModulebuilder(courseId);
+  return items.map((item) => ({
     id: item.id,
     title: item.title,
     type: item.type || 'pdf',
     url: item.url,
     source: 'modulebuilder' as MaterialSource,
-  }, true));
+  }));
 }
 
 async function fetchExternal(loadModules: () => Promise<RawModule[]>): Promise<Material[]> {
@@ -307,7 +295,7 @@ async function fetchExternal(loadModules: () => Promise<RawModule[]>): Promise<M
   for (const module of raw) {
     for (const item of module.items ?? []) {
       if (item.type !== 'ExternalTool') continue;
-      materials.push(withPlaywrightRequired({
+      materials.push({
         id: String(item.id),
         title: item.title,
         type: 'ExternalTool',
@@ -316,7 +304,7 @@ async function fetchExternal(loadModules: () => Promise<RawModule[]>): Promise<M
         module_name: module.name,
         ...(item.external_url ? { external_url: resolveMaterialUrl(item.external_url) } : {}),
         ...moduleAvailability(module, item),
-      }, true));
+      });
     }
   }
   return materials;
@@ -488,14 +476,6 @@ function mergeMaterialGroup(group: Material[]): Material {
       : {}),
     ...(downloaded?.local_path ? { local_path: downloaded.local_path } : {}),
   };
-  if (locator.source !== primary.source) {
-    delete merged.is_playwright_required;
-    delete merged.is_playright_required;
-  }
-  if (group.some((material) => material.is_playwright_required || material.is_playright_required)) {
-    merged.is_playwright_required = true;
-    merged.is_playright_required = true;
-  }
   return merged;
 }
 
@@ -654,7 +634,8 @@ export async function getMaterials(
     Object.assign(material, classifyMaterial(material));
     material.fingerprint = materialFingerprint(material);
     // Prefer semantic evidence from the source list over a historical launch.
-    if (material.acquisition_policy !== 'needs_resolution' || material.type !== 'ExternalTool') continue;
+    if (material.acquisition_policy !== 'needs_resolution'
+        || (material.type !== 'ExternalTool' && !isVerifiedOcsViewerUrl(material.url ?? ''))) continue;
     try {
       const previous = cache?.getMaterialResolution?.(courseId, material.id, material.fingerprint);
       const resolution = options.resolveExternal && material.url

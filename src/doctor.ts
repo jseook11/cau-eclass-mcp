@@ -1,4 +1,3 @@
-import { chromium } from 'playwright';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
@@ -44,24 +43,6 @@ function formatCredentialDiagnostics(diag: CredentialDiagnostics): string {
   return `backend=${diag.backend} (${diag.reason}), keytar=${diag.keytarLoaded ? 'loaded' : 'unavailable'}` +
     `${diag.keytarError ? `(${diag.keytarError})` : ''}, masterKey=${diag.masterKeyPresent ? 'yes' : 'no'}` +
     `, dbus=${diag.dbusSession ? 'yes' : 'no'}`;
-}
-
-async function checkPlaywright(): Promise<CheckResult> {
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
-  try {
-    browser = await chromium.launch({ headless: true });
-    const version = browser.version();
-    return {
-      name: 'Playwright Chromium',
-      ok: true,
-      detail: version ? `launch ok (${version})` : 'launch ok',
-    };
-  } catch (err) {
-    const message = formatErrorDetail(err);
-    return { name: 'Playwright Chromium', ok: false, detail: message };
-  } finally {
-    await browser?.close().catch(() => undefined);
-  }
 }
 
 async function checkEclassAuth(session: BrowserSession): Promise<CheckResult> {
@@ -221,7 +202,6 @@ export async function runDoctor(
   const results: CheckResult[] = [];
   const credentials = await resolveDoctorCredentials(username, options);
   const resolvedUsername = credentials.username;
-  results.push(await checkPlaywright());
 
   if (!resolvedUsername) {
     const detail = 'ECLASS_USERNAME이 설정되지 않았습니다. Hermes 사용자는 ' +

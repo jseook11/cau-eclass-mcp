@@ -1,6 +1,6 @@
 import { CanvasClient } from './canvas-client.js';
 import type { ResourceItem } from './types.js';
-import { parseResourceItems } from './resource-items.js';
+import { parseModulebuilderItems, parseResourceItems } from './resource-items.js';
 
 const BASE_URL = 'https://eclass3.cau.ac.kr';
 const LEARNINGX_API_ORIGIN = 'https://eclass3.cau.ac.kr';
@@ -255,8 +255,21 @@ export async function fetchCourseResourceViaApi(
   const resourcesUrl = new URL(`${BASE_URL}/learningx/api/v1/courses/${courseId}/resources_db`);
   resourcesUrl.searchParams.set('user_login', userLogin);
   const body = await fetchJson<unknown>(resourcesUrl, token);
-  // strict: 응답 형태를 인식하지 못하면 throw → 호출자가 Playwright 폴백으로 전환
+  // Reject schema changes instead of silently reporting an empty list.
   return parseResourceItems(body, { strict: true });
+}
+
+/** Modulebuilder uses the same LearningX launch token as the resource library. */
+export async function fetchModulebuilderViaApi(client: CanvasClient, courseId: number): Promise<ResourceItem[]> {
+  const body = await fetchLearningxModules(client, courseId);
+  return parseModulebuilderItems(body);
+}
+
+export async function fetchLearningxModules(client: CanvasClient, courseId: number): Promise<unknown[]> {
+  const token = await acquireLearningxToken(client, courseId);
+  const body = await fetchJson<unknown>(new URL(`${BASE_URL}/learningx/api/v1/courses/${courseId}/modules?include_detail=true`), token);
+  if (!Array.isArray(body)) throw new Error('Unexpected LearningX modules response shape');
+  return body;
 }
 
 // --- LearningX SIS / 개설강좌 정보 (시험 일정 v2) ---

@@ -118,7 +118,7 @@ export async function downloadFileToDisk(
   assertAllowedOrigin(url);
   const parsedUrl = new URL(url);
   if (parsedUrl.hostname === 'ocs.cau.ac.kr') {
-    throw new Error('OCS files must be downloaded via the Playwright path (viewUrl), not the direct download path');
+    throw new Error('OCS documents require the HTTP metadata download path with a viewer URL');
   }
 
   // Sanitize filename to prevent path traversal

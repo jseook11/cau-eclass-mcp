@@ -12,7 +12,7 @@
 
 - [ ] `eclass_get_materials` 조회 결과를 서버에 저장하고 고유한 `list_key`를 반환한다.
 - [ ] 응답의 각 자료에 목록 내 고정 번호 `no`를 부여한다. 제목, 주차, 파일 종류, 다운로드 가능 여부, 캐시 여부를 선택 정보로 제공한다.
-- [ ] 내부에는 원본 자료 객체의 ID, URL, ExternalTool URL, source, Playwright 플래그, 분류 및 잠금 정보를 보존한다.
+- [ ] 내부에는 원본 자료 객체의 ID, URL, ExternalTool URL, source, LTI 런치 표시, 분류 및 잠금 정보를 보존한다.
 - [ ] 다운로드 도구에 `list_key`와 `select`를 받는 선택 계층을 추가한다. 기존 다운로드 엔진은 재사용한다.
 - [ ] `select`는 `numbers`, `query`, `all_downloadable_pdfs` 중 정확히 하나를 허용한다.
 - [ ] 캐시 재사용 및 목적지 충돌 정책을 선택 조건과 분리한다. backfill에서는 기존 파일 덮어쓰기를 허용하지 않는다.
@@ -85,7 +85,7 @@
 
 이행 기간에 기존 메타데이터 인자 방식도 유지한다면 다음 호출 규칙을 다운로드 도구 설명 앞부분에 추가한다.
 
-> Build download requests directly from the material objects returned by `eclass_get_materials`. Map `id` to `file_id` and `title` to `display_name`. Preserve all returned download-routing fields, especially `url`, `external_url`, and Playwright flags, along with classification and lock fields. Do not reconstruct requests from IDs and titles alone. If required routing metadata is missing, refresh or resolve the material instead of retrying the same request.
+> Build download requests directly from the material objects returned by `eclass_get_materials`. Map `id` to `file_id` and `title` to `display_name`. Preserve all returned download-routing fields, especially `url`, `external_url`, and LTI launch flags, along with classification and lock fields. Do not reconstruct requests from IDs and titles alone. If required routing metadata is missing, refresh or resolve the material instead of retrying the same request.
 
 ### 완료 기준
 

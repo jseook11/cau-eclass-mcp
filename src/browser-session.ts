@@ -1,10 +1,6 @@
 import { HttpSession, SessionExpiredError } from './http-session.js';
 import { createCanvasTokenFromSession, listCanvasTokensFromSession, revokeCanvasTokenFromSession, type SessionTokenCreationResponse } from './canvas-session-tokens.js';
-import { chromium } from 'playwright';
-import type { BrowserContext, Frame, Page, Request, Response } from 'playwright';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import type { BrowserContext, Response } from 'playwright';
 import type { CachedToken, CachedTokenRevocation, CachedTokenV2, ResourceItem } from './types.js';
 import { CanvasClient } from './canvas-client.js';
 import {
@@ -30,47 +26,13 @@ import { CanvasTokenRevocationLedger } from './canvas-token-revocation-ledger.js
 import { deleteCredential, getCredential, setCredential } from './credential-store.js';
 import { redactUrl } from './discovery/redact.js';
 import { debugLog } from './secrets.js';
-import { fetchCourseResourceViaApi } from './learningx-client.js';
-import { parseModulebuilderItems, parseResourceItems } from './resource-items.js';
-import { sanitizeFileName, materialStorageKey } from './utils.js';
-import { resolveDownloadFilename } from './download-filename.js';
-import {
-  isOcsViewerUrl,
-  resolveLaunchFromContext,
-  type LaunchArtifact,
-  type LaunchObservation,
-  type LtiPageSnapshot,
-} from './external-tool-launch.js';
+import { fetchModulebuilderViaApi, fetchCourseResourceViaApi } from './learningx-client.js';
+import type { LaunchArtifact } from './external-tool-launch.js';
+import { downloadOcsDocument, resolveHttpExternalTool } from './http-materials.js';
+export { parseLearningxBoardLocation, parseLearningxBoardPostAttachment } from './http-materials.js';
 
 const BASE_URL = CANVAS_BASE_URL;
 const KEYCHAIN_SERVICE = 'eclass-mcp';
-
-// Allowlist of origins that may receive credentials (cookies or Bearer token)
-const CREDENTIAL_ALLOWED_ORIGINS = new Set([
-  'https://eclass3.cau.ac.kr',
-  'https://ocs.cau.ac.kr',
-  'https://mportal2.cau.ac.kr',
-  'https://rpt80.cau.ac.kr',
-]);
-
-function assertAllowedOrigin(url: string, label: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error(`[browser-session] ${label} rejected: invalid URL`);
-  }
-  if (!CREDENTIAL_ALLOWED_ORIGINS.has(parsed.origin)) {
-    throw new Error(`[browser-session] ${label} rejected: origin not in allowlist`);
-  }
-}
-
-function expandTilde(filePath: string): string {
-  if (filePath.startsWith('~/') || filePath === '~') {
-    return path.join(os.homedir(), filePath.slice(1));
-  }
-  return filePath;
-}
 
 async function readTokenFromKeychain(username: string): Promise<CachedToken | null> {
   const raw = await getCredential(KEYCHAIN_SERVICE, `token:${username}`);
@@ -210,35 +172,10 @@ export interface EclassCourseresourceProbeResult {
   reason?: string;
 }
 
-export interface OcsCaptureFailureDetails {
-  resourceId: string;
-  displayName: string;
-  finalPageUrl: string;
-  pageTitle: string;
-  recentFrames: string[];
-  recentRequests: string[];
-  recentResponses: string[];
-  mediaCandidates: string[];
-  videoSources: string[];
-  iframeSources: string[];
-}
-
-type SessionContextOptions = {
-  acceptDownloads?: boolean;
-};
-
+type SessionContextOptions = { acceptDownloads?: boolean };
 function normalizeCourseId(raw: unknown): number | null {
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-  if (typeof raw === 'string' && raw.trim() !== '') {
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function trackRecent(entries: string[], value: string, limit = 12): void {
-  entries.push(value);
-  if (entries.length > limit) entries.shift();
+  const value = typeof raw === 'number' || typeof raw === 'string' && raw.trim() ? Number(raw) : NaN;
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 const DIAGNOSTIC_URL_PATTERN = /(?:https?|blob:https?):\/\/[^\s|]+/gi;
@@ -265,308 +202,7 @@ function sessionRedirectError(rawUrl: string): Error {
   return new Error(`SESSION_REDIRECT:${redactBrowserUrl(rawUrl)}`);
 }
 
-function summarizeRecent(entries: string[]): string {
-  return entries.length > 0 ? entries.map(redactBrowserDiagnostic).join(' | ') : 'none';
-}
-
-function isTrackedBrowserUrl(url: string): boolean {
-  return url.includes('eclass3.cau.ac.kr') || url.includes('ocs.cau.ac.kr') || url.includes('canvas.cau.ac.kr');
-}
-
-function matchesLikelyMediaUrl(url: string): boolean {
-  return /\.(m3u8|mp4|m4v|ts|mp3|wav)(?:$|[?#])/i.test(url) || /\/(media|stream|download)\//i.test(url);
-}
-
-export function isStreamingMediaType(type: string | null | undefined): boolean {
-  const normalized = type?.trim().toLowerCase();
-  if (!normalized) return false;
-  return [
-    'mp4',
-    'm4v',
-    'mov',
-    'avi',
-    'wmv',
-    'video',
-    'movie',
-    'media',
-    'hls',
-    'm3u8',
-    'stream',
-    'audio',
-    'mp3',
-    'wav',
-  ].includes(normalized) || normalized.startsWith('video/');
-}
-
-function isDownloadableResponse(response: Response): boolean {
-  const url = response.url();
-  const headers = response.headers();
-  const contentType = (headers['content-type'] ?? '').toLowerCase();
-  const contentDisposition = (headers['content-disposition'] ?? '').toLowerCase();
-
-  if (response.status() !== 200) return false;
-  if (contentDisposition.includes('attachment')) return true;
-  if (contentType.includes('application/pdf')) return true;
-  if (contentType.includes('application/octet-stream')) return true;
-  if (contentType.includes('application/zip')) return true;
-  if (/\.(pdf|zip|doc|docx|ppt|pptx|xls|xlsx|hwp)(?:$|[?#])/i.test(url)) return true;
-  return false;
-}
-
-async function readLtiPageSnapshot(page: Page): Promise<LtiPageSnapshot> {
-  const snapshots = await Promise.all(page.frames().map(async (frame) => {
-    try {
-      return await frame.evaluate(() => {
-        const forms = Array.from(document.querySelectorAll('form')).map((form) => ({
-          id: form.id || undefined,
-          action: form.getAttribute('action') || form.action || '',
-          method: (form.getAttribute('method') || form.method || 'get').toLowerCase(),
-        }));
-        const iframes = Array.from(document.querySelectorAll('iframe'))
-          .map((iframe) => iframe.getAttribute('src'))
-          .filter((src): src is string => Boolean(src && src.trim()));
-        return { url: location.href, forms, iframes, hasVideo: document.querySelector('video') !== null };
-      });
-    } catch {
-      return { url: frame.url(), forms: [] as LtiPageSnapshot['forms'], iframes: [] as string[] };
-    }
-  }));
-
-  return {
-    url: page.url(),
-    forms: snapshots.flatMap((snapshot) => snapshot.forms),
-    iframes: snapshots.flatMap((snapshot) => snapshot.iframes),
-    hasVideo: snapshots.some((snapshot) => 'hasVideo' in snapshot && snapshot.hasVideo),
-  };
-}
-
-async function submitLtiForm(page: Page, selector: string): Promise<void> {
-  const trySubmit = async (root: Page | Frame): Promise<boolean> => {
-    const locator = root.locator(selector).first();
-    if (await locator.count() === 0) return false;
-    await locator.evaluate((form) => {
-      if (form instanceof HTMLFormElement) form.submit();
-    });
-    return true;
-  };
-
-  if (await trySubmit(page)) return;
-  for (const frame of page.frames()) {
-    if (await trySubmit(frame)) return;
-  }
-  throw new Error(`LTI form not found: ${selector}`);
-}
-
-interface LearningxBoardAttachment {
-  filename?: string;
-  url?: string;
-  canvas_file_id?: number | string;
-}
-
-interface LearningxBoardPostDetail {
-  attachments?: LearningxBoardAttachment[];
-}
-
-export interface LearningxBoardLocation {
-  boardId: string;
-  postId?: string;
-}
-
-interface LearningxBoardContext extends LearningxBoardLocation {
-  frame: Frame;
-  url: string;
-}
-
-interface CapturedLearningxBoardDetail extends LearningxBoardLocation {
-  courseId: number;
-  body: Promise<unknown | null>;
-}
-
-export function parseLearningxBoardLocation(rawUrl: string): LearningxBoardLocation | null {
-  try {
-    const url = new URL(rawUrl);
-    if (url.origin !== BASE_URL) return null;
-    const match = url.pathname.match(
-      /^\/learningx\/lti\/learningx_board\/boards\/(\d+)(?:\/posts\/(\d+))?\/?$/,
-    );
-    if (!match) return null;
-    return { boardId: match[1], ...(match[2] ? { postId: match[2] } : {}) };
-  } catch {
-    return null;
-  }
-}
-
-function parseLearningxBoardApiLocation(rawUrl: string): (LearningxBoardLocation & { courseId: number }) | null {
-  try {
-    const url = new URL(rawUrl);
-    if (url.origin !== BASE_URL) return null;
-    const match = url.pathname.match(
-      /^\/learningx\/api\/v1\/learningx_board\/courses\/(\d+)\/boards\/(\d+)\/posts\/(\d+)\/?$/,
-    );
-    if (!match) return null;
-    return { courseId: Number(match[1]), boardId: match[2], postId: match[3] };
-  } catch {
-    return null;
-  }
-}
-
-function boardContextFromPage(page: Page): LearningxBoardContext | null {
-  for (const frame of page.frames()) {
-    const location = parseLearningxBoardLocation(frame.url());
-    if (location) return { frame, url: frame.url(), ...location };
-  }
-  return null;
-}
-
-function filenameExtension(filename: string): string | undefined {
-  const match = /\.([a-z0-9]+)$/i.exec(filename.trim());
-  return match?.[1].toLowerCase();
-}
-
-function canvasFileIdFromUrl(rawUrl: string): string | null {
-  try {
-    const match = new URL(rawUrl).pathname.match(/\/files\/(\d+)(?:\/download)?\/?$/);
-    return match?.[1] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function parseLearningxBoardPostAttachment(body: unknown): LaunchArtifact | null {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const detail = body as LearningxBoardPostDetail;
-  if (!Array.isArray(detail.attachments)) return null;
-
-  for (const attachment of detail.attachments) {
-    if (!attachment || typeof attachment !== 'object') continue;
-    if (typeof attachment.url !== 'string' || typeof attachment.filename !== 'string') continue;
-    const filename = attachment.filename.trim();
-    if (!filename) continue;
-    let attachmentUrl: URL;
-    try {
-      attachmentUrl = new URL(attachment.url, BASE_URL);
-    } catch {
-      continue;
-    }
-    if (attachmentUrl.origin !== BASE_URL) continue;
-    const fileId = attachment.canvas_file_id !== undefined
-      ? String(attachment.canvas_file_id)
-      : canvasFileIdFromUrl(attachmentUrl.toString());
-    if (!fileId || !/^\d+$/.test(fileId)) continue;
-
-    return {
-      kind: 'file',
-      url: attachmentUrl.toString(),
-      type: filenameExtension(filename),
-      filename,
-    };
-  }
-
-  return null;
-}
-
-async function findCapturedBoardAttachment(
-  captures: CapturedLearningxBoardDetail[],
-  courseId: number,
-  boardId: string,
-  postId?: string,
-): Promise<{ found: boolean; artifact: LaunchArtifact | null }> {
-  const matches = captures.filter((capture) => (
-    capture.courseId === courseId
-    && capture.boardId === boardId
-    && (!postId || capture.postId === postId)
-  ));
-  if (matches.length === 0) return { found: false, artifact: null };
-
-  let parsedResponse = false;
-  for (const capture of matches.slice().reverse()) {
-    const body = await capture.body;
-    if (body === null) continue;
-    parsedResponse = true;
-    const artifact = parseLearningxBoardPostAttachment(body);
-    if (artifact) return { found: true, artifact };
-  }
-  return { found: parsedResponse, artifact: null };
-}
-
-async function resolveLearningxBoardAttachment(
-  page: Page,
-  courseId: number,
-  captures: CapturedLearningxBoardDetail[],
-): Promise<LaunchArtifact | null | undefined> {
-  const boardContext = boardContextFromPage(page);
-  if (!boardContext) return undefined;
-  const { boardId, postId } = boardContext;
-
-  const captured = await findCapturedBoardAttachment(captures, courseId, boardId, postId);
-  if (captured.artifact) return captured.artifact;
-  if (postId) return captured.found ? null : undefined;
-
-  const initialRows = boardContext.frame.locator('table tbody tr');
-  const rowCount = await initialRows.count();
-  if (rowCount === 0) return undefined;
-
-  const listUrl = boardContext.url;
-  for (let index = 0; index < rowCount; index += 1) {
-    const current = boardContextFromPage(page);
-    if (!current || current.boardId !== boardId || current.postId) return undefined;
-    const rows = current.frame.locator('table tbody tr');
-    if (await rows.count() <= index) return undefined;
-
-    const detailResponse = page.waitForResponse(
-      (response: Response) => {
-        const location = parseLearningxBoardApiLocation(response.url());
-        return response.ok()
-          && location?.courseId === courseId
-          && location.boardId === boardId;
-      },
-      { timeout: 15000 },
-    );
-    detailResponse.catch(() => undefined);
-    await rows.nth(index).locator('td').nth(1).click();
-    const response = await detailResponse;
-    const artifact = parseLearningxBoardPostAttachment(await response.json() as unknown);
-    if (artifact) return artifact;
-
-    if (index < rowCount - 1) {
-      const detailContext = boardContextFromPage(page);
-      if (!detailContext || detailContext.boardId !== boardId) return undefined;
-      await detailContext.frame.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await detailContext.frame.locator('table tbody tr').first().waitFor({ state: 'visible', timeout: 15000 });
-    }
-  }
-
-  return null;
-}
-
-export function buildOcsCaptureFailureMessage(details: OcsCaptureFailureDetails): string {
-  const finalPage = details.finalPageUrl ? redactBrowserUrl(details.finalPageUrl) : '(unknown)';
-  const title = details.pageTitle || '(unknown)';
-  const recentFrames = summarizeRecent(details.recentFrames);
-  const recentRequests = summarizeRecent(details.recentRequests);
-  const recentResponses = summarizeRecent(details.recentResponses);
-  const mediaCandidates = summarizeRecent(details.mediaCandidates);
-  const videoSources = summarizeRecent(
-    details.videoSources.map((url) => redactBrowserUrl(url, details.finalPageUrl)),
-  );
-  const iframeSources = summarizeRecent(
-    details.iframeSources.map((url) => redactBrowserUrl(url, details.finalPageUrl)),
-  );
-
-  return (
-    'OCS viewer loaded but no downloadable file response was captured.\n' +
-    `  resource_id: ${details.resourceId}\n` +
-    `  display_name: ${details.displayName}\n` +
-    `  final page: ${finalPage}\n` +
-    `  page title: ${title}\n` +
-    `  recent frames: ${recentFrames}\n` +
-    `  recent requests: ${recentRequests}\n` +
-    `  recent responses: ${recentResponses}\n` +
-    `  media candidates: ${mediaCandidates}\n` +
-    `  video sources: ${videoSources}\n` +
-    `  iframe sources: ${iframeSources}`
-  );
-}
+export { isStreamingMediaType } from './media-types.js';
 
 export class BrowserSession {
   private client: CanvasClient | null = null;
@@ -577,7 +213,7 @@ export class BrowserSession {
   private lastAuthSource: 'cache' | 'login' | null = null;
   // Single-flight lock for 401-triggered token refresh
   private tokenRefreshPromise: Promise<string> | null = null;
-  // Injectable for tests: courseresource API-first fetch before Playwright fallback
+  // Injectable HTTP resource fetcher for tests.
   private courseResourceApiFetcher: typeof fetchCourseResourceViaApi = fetchCourseResourceViaApi;
 
   /**
@@ -618,6 +254,7 @@ export class BrowserSession {
 
     if (!this.playwrightCheckPromise) {
       this.playwrightCheckPromise = (async () => {
+        const { chromium } = await import('playwright');
         let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
         try {
           browser = await chromium.launch({ headless: true });
@@ -670,7 +307,7 @@ export class BrowserSession {
       };
     }
 
-    const items = await this.interceptCourseresource(firstCourseId);
+    const items = await this.fetchCourseresources(firstCourseId);
     return {
       course_id: firstCourseId,
       item_count: items.length,
@@ -971,6 +608,7 @@ export class BrowserSession {
     let cachedSessionState: any = await readSessionFromKeychain(this.username) ?? undefined;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const { chromium } = await import('playwright');
       const browser = await chromium.launch({ headless: true });
       try {
         const context = await browser.newContext({
@@ -1011,18 +649,35 @@ export class BrowserSession {
     throw new Error(`${label} 세션 재시도 후에도 브라우저 인증을 복구하지 못했습니다.`);
   }
 
-  /**
-   * Runs fn inside an authenticated browser context for endpoint discovery
-   * (src/discovery/, scripts/discover.ts). Session refresh and origin rules
-   * are identical to the other Playwright flows.
-   */
-  async withDiscoveryContext<T>(
-    label: string,
-    fn: (context: BrowserContext) => Promise<T>,
-  ): Promise<T> {
+  /** Browser context reserved for assignment submission and its dry-run recorder. */
+  async withSubmissionContext<T>(label: string, fn: (context: BrowserContext) => Promise<T>): Promise<T> {
     await this.ensurePlaywrightReady();
     await this.getClient();
     return this.withAuthenticatedContext(label, {}, fn);
+  }
+
+  /** Shares and refreshes native HTTP cookies under the account lock. */
+  async withHttpSession<T>(fn: (session: HttpSession) => Promise<T>): Promise<T> {
+    return withCanvasTokenLock(this.username, async (lock) => {
+      let session = new HttpSession(await readSessionFromKeychain(this.username));
+      if (!await session.authenticated()) {
+        session = new HttpSession();
+        await session.login(this.username, this.credentialFactory);
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const result = await fn(session);
+          await lock.assertOwned();
+          await writeSessionToKeychain(this.username, session.storageState());
+          return result;
+        } catch (error) {
+          if (attempt !== 0 || (error as { code?: string } | null)?.code !== 'EXTERNAL_TOOL_SESSION_EXPIRED') throw error;
+          session = new HttpSession();
+          await session.login(this.username, this.credentialFactory);
+        }
+      }
+      throw new SessionExpiredError();
+    });
   }
 
   /** Authenticated mportal JSON requests share the account's HTTP cookie state. */
@@ -1110,401 +765,23 @@ export class BrowserSession {
     });
   }
 
-  /**
-   * Downloads a courseresource file using Playwright.
-   * If viewUrl (OCS viewer URL) is provided, navigates there and intercepts the file response.
-   * Returns the local path where the file was saved.
-   */
   async downloadCourseresourceFile(
-    courseId: number,
-    resourceId: string,
-    displayName: string,
-    downloadDir: string,
-    viewUrl?: string,
+    courseId: number, resourceId: string, displayName: string, downloadDir: string, viewUrl?: string,
   ): Promise<string> {
-    await this.ensurePlaywrightReady();
-    await this.getClient();
-
-    const safeName = sanitizeFileName(displayName);
-    if (!safeName) {
-      throw new Error(`[browser-session] Invalid displayName: ${JSON.stringify(displayName)}`);
-    }
-    const dir = path.join(expandTilde(downloadDir), String(courseId), materialStorageKey(resourceId));
-    await fs.mkdir(dir, { recursive: true });
-
-    debugLog('browser-session', `Downloading courseresource for course ${courseId}`);
-
-    return this.withAuthenticatedContext('courseresource download', { acceptDownloads: true }, async (context) => {
-      if (viewUrl) {
-        assertAllowedOrigin(viewUrl, 'viewUrl');
-        const page = await context.newPage();
-        const recentRequests: string[] = [];
-        const recentResponses: string[] = [];
-        const recentFrames: string[] = [];
-        const mediaCandidates: string[] = [];
-        let capturedFileUrl: string | null = null;
-
-        const recordMediaCandidate = (label: string, url: string): void => {
-          if (!isTrackedBrowserUrl(url)) return;
-          if (!matchesLikelyMediaUrl(url)) return;
-          trackRecent(mediaCandidates, `${label} ${redactBrowserUrl(url)}`);
-        };
-
-        page.on('request', (request: Request) => {
-          const url = request.url();
-          if (!isTrackedBrowserUrl(url)) return;
-          const resourceType = request.resourceType();
-          trackRecent(recentRequests, `${request.method()} ${resourceType} ${redactBrowserUrl(url)}`);
-          recordMediaCandidate(`[request:${resourceType}]`, url);
-        });
-        page.on('response', (response: Response) => {
-          const url = response.url();
-          if (!isTrackedBrowserUrl(url)) return;
-          const resourceType = response.request().resourceType();
-          const contentType = response.headers()['content-type'] ?? '';
-          trackRecent(recentResponses, `${response.status()} ${resourceType} ${contentType || '(no content-type)'} ${redactBrowserUrl(url)}`);
-          recordMediaCandidate(`[response:${resourceType}:${contentType || 'unknown'}]`, url);
-          if (capturedFileUrl) return;
-          if (isDownloadableResponse(response)) {
-            capturedFileUrl = url;
-          }
-        });
-        page.on('framenavigated', (frame: Frame) => {
-          const frameUrl = frame.url();
-          if (!frameUrl || !isTrackedBrowserUrl(frameUrl)) return;
-          trackRecent(recentFrames, redactBrowserUrl(frameUrl));
-        });
-        context.on('page', (spawnedPage: Page) => {
-          spawnedPage.on('request', (request: Request) => {
-            const url = request.url();
-            if (!isTrackedBrowserUrl(url)) return;
-            const resourceType = request.resourceType();
-            trackRecent(recentRequests, `${request.method()} ${resourceType} ${redactBrowserUrl(url)}`);
-            recordMediaCandidate(`[popup-request:${resourceType}]`, url);
-          });
-          spawnedPage.on('response', (response: Response) => {
-            const url = response.url();
-            if (!isTrackedBrowserUrl(url)) return;
-            const resourceType = response.request().resourceType();
-            const contentType = response.headers()['content-type'] ?? '';
-            trackRecent(recentResponses, `${response.status()} ${resourceType} ${contentType || '(no content-type)'} ${redactBrowserUrl(url)}`);
-            recordMediaCandidate(`[popup-response:${resourceType}:${contentType || 'unknown'}]`, url);
-            if (!capturedFileUrl && isDownloadableResponse(response)) {
-              capturedFileUrl = url;
-            }
-          });
-          spawnedPage.on('framenavigated', (frame: Frame) => {
-            const frameUrl = frame.url();
-            if (!frameUrl || !isTrackedBrowserUrl(frameUrl)) return;
-            trackRecent(recentFrames, redactBrowserUrl(frameUrl));
-          });
-        });
-
-        debugLog('browser-session', 'Navigating to OCS viewer');
-        await page.goto(viewUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        if (isSsoLoginUrl(page.url())) {
-          throw sessionRedirectError(page.url());
-        }
-
-        if (!capturedFileUrl) {
-          const [pageTitle, domSnapshot] = await Promise.all([
-            page.title().catch(() => ''),
-            page.evaluate(() => {
-              const videoSources = Array.from(document.querySelectorAll('video')).flatMap((video) => {
-                const candidates = [
-                  video.currentSrc,
-                  video.getAttribute('src'),
-                  ...Array.from(video.querySelectorAll('source')).map((source) => source.getAttribute('src')),
-                ];
-                return candidates.filter((value): value is string => Boolean(value && value.trim()));
-              });
-              const iframeSources = Array.from(document.querySelectorAll('iframe'))
-                .map((iframe) => iframe.getAttribute('src'))
-                .filter((value): value is string => Boolean(value && value.trim()));
-              return {
-                videoSources: Array.from(new Set(videoSources)),
-                iframeSources: Array.from(new Set(iframeSources)),
-              };
-            }).catch(() => ({ videoSources: [] as string[], iframeSources: [] as string[] })),
-          ]);
-
-          throw new Error(buildOcsCaptureFailureMessage({
-            resourceId: resourceId,
-            displayName: displayName,
-            finalPageUrl: redactBrowserUrl(page.url()),
-            pageTitle,
-            recentFrames,
-            recentRequests,
-            recentResponses,
-            mediaCandidates,
-            videoSources: domSnapshot.videoSources.map((url) => redactBrowserUrl(url, page.url())),
-            iframeSources: domSnapshot.iframeSources.map((url) => redactBrowserUrl(url, page.url())),
-          }));
-        }
-
-        assertAllowedOrigin(capturedFileUrl, 'capturedFileUrl');
-        const apiResponse = await context.request.get(capturedFileUrl);
-        if (!apiResponse.ok()) {
-          throw new Error(`File fetch failed: ${apiResponse.status()}`);
-        }
-        const headers = apiResponse.headers();
-        const resolvedName = resolveDownloadFilename(safeName, {
-          contentDisposition: headers['content-disposition'],
-          contentType: headers['content-type'],
-        });
-        const destPath = path.join(dir, resolvedName);
-        const buffer = await apiResponse.body();
-        await fs.writeFile(destPath, buffer);
-        debugLog('browser-session', 'Downloaded via OCS viewer intercept');
-        return destPath;
-      }
-
-      const page = await context.newPage();
-      const ltiUrl = `${BASE_URL}/courses/${courseId}/external_tools/3`;
-      await page.goto(ltiUrl, { waitUntil: 'networkidle', timeout: 30000 });
-      if (isSsoLoginUrl(page.url())) {
-        throw sessionRedirectError(page.url());
-      }
-
-      throw new Error(`Resource ${resourceId} has no viewUrl — cannot download without OCS viewer URL`);
-    });
+    if (!viewUrl) throw new Error(`Resource ${resourceId} has no viewUrl`);
+    return this.withHttpSession(session => downloadOcsDocument(courseId, resourceId, displayName, downloadDir, viewUrl, session));
   }
 
-  /**
-   * Opens a Canvas ExternalTool module item, follows the LTI launch
-   * (auto-POST form, iframe, or popup), and returns the first PDF/PPT/PPTX
-   * or OCS viewer locator. Does not download the file.
-   */
   async resolveExternalToolLaunch(courseId: number, moduleItemUrl: string): Promise<LaunchArtifact> {
-    await this.ensurePlaywrightReady();
-    await this.getClient();
-    assertAllowedOrigin(moduleItemUrl, 'moduleItemUrl');
-
-    return this.withAuthenticatedContext('external tool launch', { acceptDownloads: true }, async (context) => {
-      const page = await context.newPage();
-      const observations: LaunchObservation[] = [];
-      const boardDetails: CapturedLearningxBoardDetail[] = [];
-
-      const recordObservation = (observation: LaunchObservation): void => {
-        if (!isTrackedBrowserUrl(observation.url) && !isOcsViewerUrl(observation.url)) return;
-        observations.push(observation);
-      };
-
-      const attachPage = (target: Page, source: 'response' | 'popup'): void => {
-        target.on('response', (response: Response) => {
-          const boardLocation = parseLearningxBoardApiLocation(response.url());
-          if (response.ok() && boardLocation) {
-            boardDetails.push({
-              ...boardLocation,
-              body: response.json().catch(() => null),
-            });
-          }
-          recordObservation({
-            source: 'response',
-            url: response.url(),
-            status: response.status(),
-            contentType: response.headers()['content-type'],
-            contentDisposition: response.headers()['content-disposition'],
-          });
-        });
-        target.on('framenavigated', (frame: Frame) => {
-          const frameUrl = frame.url();
-          if (!frameUrl) return;
-          recordObservation({
-            source: frame === target.mainFrame() ? 'navigation' : 'iframe',
-            url: frameUrl,
-          });
-        });
-        target.on('download', (download) => {
-          recordObservation({
-            source: 'download',
-            url: download.url(),
-            filename: download.suggestedFilename(),
-          });
-        });
-      };
-
-      attachPage(page, 'response');
-      context.on('page', (spawnedPage: Page) => {
-        recordObservation({ source: 'popup', url: spawnedPage.url() || moduleItemUrl });
-        attachPage(spawnedPage, 'popup');
-      });
-
-      return resolveLaunchFromContext({
-        moduleItemUrl,
-        goto: async (url) => {
-          debugLog('browser-session', `Launching ExternalTool ${url} for course ${courseId}`);
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          if (isSsoLoginUrl(page.url())) {
-            throw sessionRedirectError(page.url());
-          }
-          recordObservation({ source: 'navigation', url: page.url() });
-        },
-        readSnapshot: async () => {
-          const snapshots = await Promise.all(context.pages().map(readLtiPageSnapshot));
-          return {
-            url: page.url(), forms: snapshots.flatMap((snapshot) => snapshot.forms),
-            iframes: snapshots.flatMap((snapshot) => snapshot.iframes),
-            hasVideo: snapshots.some((snapshot) => snapshot.hasVideo),
-          };
-        },
-        submitForm: async (selector) => {
-          await submitLtiForm(page, selector);
-        },
-        observations: () => observations,
-        resolveBoardAttachment: async () => resolveLearningxBoardAttachment(page, courseId, boardDetails),
-        wait: async () => {
-          await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
-        },
-      });
-    });
-  }
-
-  /**
-   * Navigates to the modulebuilder LTI page (external_tools/211) and intercepts
-   * the modules?include_detail=true API response to extract OCS-backed materials.
-   */
-  async interceptModulebuilder(courseId: number): Promise<ResourceItem[]> {
-    await this.ensurePlaywrightReady();
-    debugLog('browser-session', `Intercepting modulebuilder for course ${courseId}`);
-    await this.getClient();
-
-    return this.withAuthenticatedContext('modulebuilder', {}, async (context) => {
-      const page = await context.newPage();
-      const modulesPromise = page.waitForResponse(
-        (response: Response) => response.url().includes('/modules?include_detail=true'),
-        { timeout: 30000 },
-      ).catch((err: unknown) => {
-        if (page.isClosed()) return null;
-        throw err;
-      });
-
-      const ltiUrl = `${BASE_URL}/courses/${courseId}/external_tools/211`;
-      await page.goto(ltiUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      if (isSsoLoginUrl(page.url())) {
-        throw sessionRedirectError(page.url());
-      }
-
-      const modulesResponse = await modulesPromise;
-      if (!modulesResponse) {
-        throw new Error('modulebuilder 응답 대기 중 페이지가 닫혔습니다.');
-      }
-      const body = await modulesResponse.json() as unknown;
-      return parseModulebuilderItems(body);
-    });
-  }
-
-  /**
-   * Navigates to the courseresource LTI page for the given course and intercepts
-   * the network response that contains the resource list (URL matches 'resources_db').
-   */
-  async interceptCourseresource(courseId: number): Promise<ResourceItem[]> {
-    debugLog('browser-session', `Fetching courseresource for course ${courseId}`);
-
     const client = await this.getClient();
-    try {
-      return await this.courseResourceApiFetcher(client, courseId, this.username);
-    } catch (err) {
-      const message = redactBrowserDiagnostic(err instanceof Error ? err.message : String(err));
-      debugLog('browser-session', `courseresource API path failed; falling back to Playwright: ${message}`);
-    }
+    return this.withHttpSession(session => resolveHttpExternalTool(session, client, courseId, moduleItemUrl));
+  }
 
-    await this.ensurePlaywrightReady();
+  async fetchModulebuilder(courseId: number): Promise<ResourceItem[]> {
+    return fetchModulebuilderViaApi(await this.getClient(), courseId);
+  }
 
-    const ltiUrl = `${BASE_URL}/courses/${courseId}/external_tools/3`;
-
-    return this.withAuthenticatedContext('courseresource', {}, async (context) => {
-      const page = await context.newPage();
-      const recentResponseUrls: string[] = [];
-      const recentRequestUrls: string[] = [];
-      const recentFrameUrls: string[] = [];
-      const spawnedPageUrls: string[] = [];
-
-      const recordRequest = (url: string): void => {
-        if (!isTrackedBrowserUrl(url)) return;
-        trackRecent(recentRequestUrls, redactBrowserUrl(url));
-      };
-
-      const recordResponse = (url: string, status: number): void => {
-        if (!isTrackedBrowserUrl(url)) return;
-        trackRecent(recentResponseUrls, `${status} ${redactBrowserUrl(url)}`);
-      };
-
-      page.on('request', (request: Request) => {
-        recordRequest(request.url());
-      });
-      page.on('response', (response: Response) => {
-        recordResponse(response.url(), response.status());
-      });
-      page.on('framenavigated', (frame: Frame) => {
-        const frameUrl = frame.url();
-        if (!frameUrl) return;
-        if (!isTrackedBrowserUrl(frameUrl)) return;
-        trackRecent(recentFrameUrls, redactBrowserUrl(frameUrl));
-      });
-      context.on('page', (spawnedPage: Page) => {
-        const initialUrl = spawnedPage.url();
-        if (initialUrl) trackRecent(spawnedPageUrls, redactBrowserUrl(initialUrl));
-        spawnedPage.on('request', (request: Request) => {
-          recordRequest(request.url());
-        });
-        spawnedPage.on('response', (response: Response) => {
-          recordResponse(response.url(), response.status());
-        });
-        spawnedPage.on('framenavigated', (frame: Frame) => {
-          const frameUrl = frame.url();
-          if (!frameUrl) return;
-          if (!isTrackedBrowserUrl(frameUrl)) return;
-          const safeFrameUrl = redactBrowserUrl(frameUrl);
-          trackRecent(recentFrameUrls, safeFrameUrl);
-          trackRecent(spawnedPageUrls, safeFrameUrl);
-        });
-      });
-
-      const resourcesPromise = page.waitForResponse(
-        (response: Response) => response.url().includes('resources_db'),
-        { timeout: 30000 },
-      ).catch((err: unknown) => {
-        if (page.isClosed()) return null;
-        throw err;
-      });
-
-      await page.goto(ltiUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      if (isSsoLoginUrl(page.url())) {
-        throw sessionRedirectError(page.url());
-      }
-
-      let resourcesResponse;
-      try {
-        resourcesResponse = await resourcesPromise;
-      } catch (err) {
-        const pageUrl = redactBrowserUrl(page.url());
-        const title = await page.title().catch(() => '');
-        const popupSummary = summarizeRecent(spawnedPageUrls);
-        const frameSummary = summarizeRecent(recentFrameUrls);
-        const requestSummary = summarizeRecent(recentRequestUrls);
-        const responseSummary = summarizeRecent(recentResponseUrls);
-        debugLog('browser-session', `courseresource timeout: page=${pageUrl} title=${title}`);
-        debugLog('browser-session', `courseresource timeout recent frames: ${frameSummary}`);
-        debugLog('browser-session', `courseresource timeout recent requests: ${requestSummary}`);
-        debugLog('browser-session', `courseresource timeout recent responses: ${responseSummary}`);
-        debugLog('browser-session', `courseresource timeout spawned pages: ${popupSummary}`);
-        const message = redactBrowserDiagnostic(err instanceof Error ? err.message : String(err));
-        throw new Error(
-          `${message}\n` +
-          `  final page: ${pageUrl}\n` +
-          `  page title: ${title || '(unknown)'}\n` +
-          `  recent frames: ${frameSummary}\n` +
-          `  recent requests: ${requestSummary}\n` +
-          `  recent responses: ${responseSummary}\n` +
-          `  spawned pages: ${popupSummary}`,
-        );
-      }
-      if (!resourcesResponse) {
-        throw new Error('courseresource 응답 대기 중 페이지가 닫혔습니다.');
-      }
-      const body = await resourcesResponse.json() as unknown;
-      return parseResourceItems(body);
-    });
+  async fetchCourseresources(courseId: number): Promise<ResourceItem[]> {
+    return this.courseResourceApiFetcher(await this.getClient(), courseId, this.username);
   }
 }

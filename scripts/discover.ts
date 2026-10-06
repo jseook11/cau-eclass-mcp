@@ -1,7 +1,7 @@
 // Endpoint discovery CLI. Live runs require credentials configured via setup.
 //
 //   pnpm exec tsx scripts/discover.ts api <path>                        Canvas API probe (e.g. /api/v1/users/self)
-//   pnpm exec tsx scripts/discover.ts page <url>                        capture network while loading an eclass page
+//   pnpm exec tsx scripts/discover.ts page <url>                        inspect HTTP page locators
 //   pnpm exec tsx scripts/discover.ts submit-flow <course_id> <assignment_id>   dry-run assignment submit recorder
 //   pnpm exec tsx scripts/discover.ts learningx <course_id> [path]    LearningX SIS endpoint probe (시험 일정 v2)
 //
@@ -10,7 +10,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BrowserSession, isSsoLoginUrl } from '../src/browser-session.js';
+import { BrowserSession } from '../src/browser-session.js';
 import {
   acquireLearningxToken,
   normalizeSisCourseInfo,
@@ -18,7 +18,7 @@ import {
 } from '../src/learningx-client.js';
 import { getEclassPassword } from '../src/secrets.js';
 import { resolveDoctorCredentials } from '../src/doctor.js';
-import { NetworkRecorder, isTrackedDiscoveryUrl } from '../src/discovery/network-capture.js';
+import { isTrackedDiscoveryUrl } from '../src/discovery/network-capture.js';
 import { recordAssignmentSubmitFlow } from '../src/discovery/submit-flow-recorder.js';
 import { redactUrl } from '../src/discovery/redact.js';
 
@@ -88,21 +88,18 @@ async function capturePage(rawUrl: string): Promise<void> {
     fail('허용된 origin이 아닙니다 (eclass3/ocs/canvas.cau.ac.kr만 지원).');
   }
   const session = await buildSession();
-  const report = await session.withDiscoveryContext('page discovery', async (context) => {
-    const page = await context.newPage();
-    const recorder = new NetworkRecorder();
-    recorder.attach(page);
-    await page.goto(rawUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    if (isSsoLoginUrl(page.url())) {
-      throw new Error(`SESSION_REDIRECT:${page.url()}`);
-    }
+  const report = await session.withHttpSession(async (http) => {
+    const result = await http.html(rawUrl);
+    const { htmlAttributes } = await import('../src/http-session.js');
+    const locators = [...result.text.matchAll(/<(?:form|iframe|script)\b[^>]*>/gi)].map(m => {
+      const a = htmlAttributes(m[0]);
+      const raw = a.action ?? a.src;
+      return raw ? redactUrl(new URL(raw, result.url).href) : undefined;
+    }).filter(Boolean);
     return {
-      requested_url: redactUrl(rawUrl),
-      final_page_url: redactUrl(page.url()),
-      page_title: await page.title().catch(() => ''),
-      endpoint_candidates: recorder.summarize(),
-      entries: recorder.entries(),
-      dropped_entries: recorder.droppedCount(),
+      requested_url: redactUrl(rawUrl), final_page_url: redactUrl(result.url),
+      status: result.status, content_type: result.headers.get('content-type'),
+      locators: [...new Set(locators)],
     };
   });
   printJson(report);

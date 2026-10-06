@@ -15,7 +15,7 @@ test('ExternalTool wrappers stay unresolved without semantic evidence, even in O
       id: 3736209, title: 'Chapter 5', type: 'ExternalTool',
       html_url: '/courses/147845/modules/items/3736209',
     }],
-  }]), mockSession({ interceptModulebuilder: async () => [{
+  }]), mockSession({ fetchModulebuilder: async () => [{
     id: '3736210', title: 'Chapter 5', type: 'pdf', url: 'https://ocs.cau.ac.kr/em/slides',
   }] }), 147845, ['external', 'modulebuilder']);
   assert.equal(result.materials.length, 2);
@@ -34,8 +34,8 @@ function mockClient(
 
 function mockSession(overrides: Partial<BrowserSession> = {}): BrowserSession {
   return {
-    interceptCourseresource: async () => [],
-    interceptModulebuilder: async () => [],
+    fetchCourseresources: async () => [],
+    fetchModulebuilder: async () => [],
     ...overrides,
   } as BrowserSession;
 }
@@ -51,7 +51,7 @@ test('getMaterials preserves announcement provenance when another source represe
       url: 'https://ocs.cau.ac.kr/em/slides',
     }],
   }]);
-  const session = mockSession({ interceptCourseresource: async () => [{
+  const session = mockSession({ fetchCourseresources: async () => [{
     id: 'resource-1', title: 'slides.pdf', type: 'pdf', url: 'https://ocs.cau.ac.kr/em/slides',
   }] });
 
@@ -149,8 +149,8 @@ test('getMaterials returns ok false when all requested sources fail', async () =
     throw new Error('Canvas API error 500');
   });
   const session = mockSession({
-    interceptCourseresource: async () => {
-      throw new Error('Playwright navigation timeout');
+    fetchCourseresources: async () => {
+      throw new Error('LearningX request timeout');
     },
   });
 
@@ -170,7 +170,7 @@ test('getMaterials treats a not-started modulebuilder as an empty successful sou
   const result = await getMaterials(
     mockClient(async () => []),
     mockSession({
-      interceptModulebuilder: async () => [],
+      fetchModulebuilder: async () => [],
     }),
     147863,
     ['modulebuilder'],
@@ -313,7 +313,7 @@ test('getMaterials merges the same opened weekly item from modulebuilder and ext
     },
   ]);
   const session = mockSession({
-    interceptModulebuilder: async () => [{
+    fetchModulebuilder: async () => [{
       id: '3707021',
       title: 'algorithm_01.1_introduction',
       type: 'movie',
@@ -336,7 +336,7 @@ test('getMaterials merges the same opened weekly item from modulebuilder and ext
   assert.equal(material.acquisition_policy, 'exclude');
 });
 
-test('getMaterials preserves ExternalTool type and both playwright flags for wrapper items', async () => {
+test('getMaterials preserves ExternalTool identity without browser flags', async () => {
   const client = mockClient(async () => [
     {
       id: 1,
@@ -355,8 +355,8 @@ test('getMaterials preserves ExternalTool type and both playwright flags for wra
   assert.equal(result.materials.length, 1);
   assert.equal(result.materials[0].type, 'ExternalTool');
   assert.equal(result.materials[0].url, 'https://eclass3.cau.ac.kr/courses/1/modules/items/11');
-  assert.equal(result.materials[0].is_playwright_required, true);
-  assert.equal(result.materials[0].is_playright_required, true);
+  assert.ok(!('is_playwright_required' in result.materials[0]));
+  assert.ok(!('is_playright_required' in result.materials[0]));
 });
 
 test('getMaterials merges Canvas file aliases across modules and announcements', async () => {
@@ -475,7 +475,7 @@ test('getMaterials removes repeated records within one source', async () => {
   };
   const result = await getMaterials(
     mockClient(async () => []),
-    mockSession({ interceptCourseresource: async () => [duplicate, duplicate] }),
+    mockSession({ fetchCourseresources: async () => [duplicate, duplicate] }),
     1,
     ['courseresource'],
   );
@@ -488,7 +488,7 @@ test('getMaterials keeps distinct items that only share a title', async () => {
   const result = await getMaterials(
     mockClient(async () => []),
     mockSession({
-      interceptCourseresource: async () => [
+      fetchCourseresources: async () => [
         { id: 'resource-1', title: '강의자료.pdf', type: 'pdf', url: null },
         { id: 'resource-2', title: '강의자료.pdf', type: 'pdf', url: null },
       ],
@@ -562,4 +562,17 @@ test('getMaterials reports cache failures as warnings without failing material l
   assert.deepEqual(result.errors, []);
   assert.equal(result.warnings.length, 1);
   assert.equal(result.warnings[0].source, 'cache');
+});
+
+test('Explicit resolution classifies untyped OCS resources using metadata', async () => {
+  const calls: string[] = [];
+  const session = mockSession({
+    fetchCourseresources: async () => [{ id: 'legacy', title: 'original', type: '', url: 'https://ocs.cau.ac.kr/em/fixture' }],
+    resolveExternalToolLaunch: async (_course, url) => { calls.push(url); return { kind: 'ocs_viewer', url, type: 'file' }; },
+  });
+  const result = await getMaterials(mockClient(async () => []), session, 1, ['courseresource'], undefined, { resolveExternal: true });
+  assert.deepEqual(calls, ['https://ocs.cau.ac.kr/em/fixture']);
+  assert.equal(result.materials[0].asset_kind, 'document');
+  assert.equal(result.materials[0].downloadable, true);
+  assert.equal(result.materials[0].acquisition_policy, 'download');
 });

@@ -117,3 +117,27 @@ test('fetchCourseResourceViaApi recovers CourseResource tool id from tabs', asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+test('modulebuilder HTTP query returns only open commons material and rejects an invalid envelope', async () => {
+  const { fetchModulebuilderViaApi } = await import('../src/learningx-client.js');
+  const originalFetch = globalThis.fetch;
+  let malformed = false;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith('/module-launch')) return new Response('<form action="https://eclass3.cau.ac.kr/learningx/lti/courseresource"><input name="launch" value="ok"></form>');
+    if (url.endsWith('/lti/courseresource')) return new Response('',{status:302,headers:{'set-cookie':'xn_api_token=module-token; Path=/'}});
+    assert.equal(url,'https://eclass3.cau.ac.kr/learningx/api/v1/courses/12345/modules?include_detail=true');
+    return new Response(JSON.stringify(malformed ? { unexpected: true } : [{module_items:[
+      {module_item_id:11,title:'slides',content_data:{item_content_type:'commons',item_content_data:{content_id:'fixture',content_type:'pdf'}}},
+      {module_item_id:12,title:'locked',content_data:{item_content_type:'commons',lecture_period_status:'not_open',item_content_data:{content_id:'secret',content_type:'pdf'}}},
+    ]}]));
+  };
+  const client=makeClient({'/api/v1/courses/12345/external_tools/sessionless_launch?id=3&launch_type=course_navigation':{url:'https://eclass3.cau.ac.kr/module-launch'}});
+  try {
+    assert.deepEqual(await fetchModulebuilderViaApi(client,12345),[{id:'11',title:'slides',type:'pdf',url:'https://ocs.cau.ac.kr/em/fixture'}]);
+    malformed=true;
+    await assert.rejects(fetchModulebuilderViaApi(client,12345),/Unexpected LearningX modules response shape/);
+    assert.ok(calls.every(url=>!url.includes('/progress')));
+  } finally { globalThis.fetch=originalFetch; }
+});

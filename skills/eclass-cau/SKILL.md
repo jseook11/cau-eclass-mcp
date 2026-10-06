@@ -70,7 +70,7 @@ description: 중앙대 eclass(LearningX/Canvas) 작업 — 강의·과제·성�
 | "X요일에 시험 있어 / 내 시험 일정" | 시험 일정 전체 (전수 조회, C10) |
 | "교재 뭐 써 / 강의계획서" | 강의계획서 |
 | "강의 백업/요약 내보내기" | 강의 백업 |
-| 툴이 인증·브라우저 오류 | troubleshooting.md |
+| 툴이 인증·API 오류 | troubleshooting.md |
 
 ## 안전 게이트
 

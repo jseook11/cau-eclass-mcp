@@ -1,7 +1,7 @@
 import { constants, privateDecrypt } from 'node:crypto';
 
 const BASE = 'https://eclass3.cau.ac.kr';
-const HOSTS = new Set(['eclass3.cau.ac.kr', 'canvas.cau.ac.kr', 'mportal2.cau.ac.kr']);
+const HOSTS = new Set(['eclass3.cau.ac.kr', 'canvas.cau.ac.kr', 'mportal2.cau.ac.kr', 'ocs.cau.ac.kr']);
 const MAX_BODY = 20 * 1024 * 1024;
 export interface SessionCookie {
   name: string; value: string; domain: string; path: string; expires: number;
@@ -32,6 +32,10 @@ function allowed(raw: string, base = BASE): URL {
     throw new Error('HTTP session destination outside allowlist');
   }
   return u;
+}
+/** Uses the same destination boundary as authenticated HTTP requests. */
+export function isAllowedHttpDestination(raw: string, base = BASE): boolean {
+  try { allowed(raw, base); return true; } catch { return false; }
 }
 function validDomain(domain: string): boolean {
   return domain === '.cau.ac.kr' || HOSTS.has(domain.replace(/^\./, ''));
@@ -87,7 +91,7 @@ export class HttpSession {
         secure: properties.has('secure'), sameSite: sameSite === 'strict' ? 'Strict' : sameSite === 'none' ? 'None' : 'Lax' });
     }
   }
-  async request(rawUrl: string, init: RequestInit = {}, follow = true): Promise<HttpResult> {
+  async open(rawUrl: string, init: RequestInit = {}, follow = true): Promise<{ url: string; response: Response }> {
     let u = allowed(rawUrl), method = init.method ?? 'GET', body = init.body;
     const headers = new Headers(init.headers);
     headers.delete('cookie');
@@ -113,15 +117,19 @@ export class HttpSession {
         }
         u = next; continue;
       }
-      const chunks: Uint8Array[] = []; let size = 0;
-      if (response.body) for await (const chunk of response.body) {
-        size += chunk.length;
-        if (size > MAX_BODY) throw new Error('Oversized HTTP session response');
-        chunks.push(chunk);
-      }
-      return { url: u.href, status: response.status, ok: response.ok, headers: response.headers, text: Buffer.concat(chunks).toString('utf8') };
+      return { url: u.href, response };
     }
     throw new Error('HTTP session redirect limit reached');
+  }
+  async request(rawUrl: string, init: RequestInit = {}, follow = true): Promise<HttpResult> {
+    const { url, response } = await this.open(rawUrl, init, follow);
+    const chunks: Uint8Array[] = []; let size = 0;
+    if (response.body) for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > MAX_BODY) throw new Error('Oversized HTTP session response');
+      chunks.push(chunk);
+    }
+    return { url, status: response.status, ok: response.ok, headers: response.headers, text: Buffer.concat(chunks).toString('utf8') };
   }
   async html(url: string): Promise<HttpResult> {
     let result = await this.request(url, { headers: { Accept: 'text/html' } });

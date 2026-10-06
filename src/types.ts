@@ -36,7 +36,7 @@ export interface Lecture {
   module_name: string;
   type: string;                // 'File' | 'ExternalTool' | 'Page' | etc.
   url: string | null;
-  is_external_lti: boolean;    // true when type is ExternalTool (needs Playwright)
+  is_external_lti: boolean;    // true when type is ExternalTool (requires LTI launch resolution)
 }
 
 // Resource item from courseresource LTI intercept

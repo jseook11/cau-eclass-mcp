@@ -75,7 +75,7 @@ MCP 클라이언트에서 자연어로 요청하면 서버가 필요한 도구�
 | 시험 시간표 | 중간·기말시험 공지 PDF 파싱 → 전체 시간표 또는 `course_id`별 시험 일시·장소 조회 | `eclass_sync_exam_schedules`, `eclass_get_exam_schedule` |
 | 강의계획서 | 과목명/교수명으로 검색 → OZ 데이터셋에서 교재·평가·주차일정 조회 | `eclass_search_syllabus`, `eclass_get_syllabus` |
 | 백업 | 강의 스냅샷을 JSON/Markdown으로 내보내기 | `eclass_export_course_snapshot` |
-| 진단 | 인증·브라우저·API 사전 점검 | `eclass_doctor` |
+| 진단 | 인증·HTTP API 사전 점검 | `eclass_doctor` |
 
 전체 도구 명세와 파라미터는 [`docs/TOOLS.md`](docs/TOOLS.md)를 참고하세요.
 
@@ -105,16 +105,15 @@ flowchart LR
     D --> F["구조화 결과 반환"]
 ```
 
-기능별로 가장 가벼운 백엔드를 우선 쓰고 막히면 브라우저로 폴백합니다.
+조회·자료 수집은 HTTP로 처리하며, 과제 제출의 UI 보조 경로만 Playwright를 사용합니다.
 
 ```mermaid
 flowchart TD
     S["eclass-mcp 서버"] --> C["Canvas REST API (강의·과제·성적·공지)"]
     S --> L["LearningX 내부 API (강의 자료·주차학습)"]
-    S --> O["OCS UniPlayer (동영상 MP4)"]
+    S --> O["OCS 메타데이터 (원본 문서·MP4)"]
     S --> M["mportal2 + OZ 데이터셋 (강의계획서)"]
-    C -.->|"읽기 우선, 실패 시"| P["Playwright 폴백"]
-    L -.-> P
+    S --> A["과제 제출: Canvas API + Playwright UI 보조"]
 ```
 
 ## 요구 사항
@@ -124,14 +123,14 @@ flowchart TD
 - **자격증명 저장소** — 다음 중 하나에 LMS 비밀번호를 저장합니다.
   - **OS 자격증명 저장소** — macOS Keychain / Linux Secret Service(libsecret). 데스크톱 환경 기본값.
   - **암호화 파일 저장소**(`secrets.enc`) — Keychain/D-Bus가 없는 **헤드리스 Linux 서버**용. AES-256-GCM으로 암호화하고 마스터 키는 비밀 관리 도구에서 주입하거나 repo 밖의 권한 `0600` 파일로 분리합니다. 자세한 내용은 [헤드리스 서버: 암호화 백엔드](#헤드리스-서버-암호화-백엔드).
-- **Playwright Chromium** — 일부 자료 인터셉트·다운로드용. `postinstall`에서 자동 설치됩니다.
+- **Playwright Chromium** — 과제 제출 UI 보조·제출 폼 탐사용 선택 구성. 사용할 때 `pnpm run install:browser`로 설치합니다.
 - **pdftotext**(poppler) — 시험 시간표 PDF 파싱용. 없으면 시험 동기화가 `EXAM_PARSER_UNAVAILABLE`을 부분 실패로 남깁니다.
   - macOS: `brew install poppler`
 
 ## 빠른 시작
 
 ```bash
-# 1) 설치 — 의존성 + better-sqlite3 rebuild + Chromium 설치(postinstall)
+# 1) 설치 — 의존성 + better-sqlite3 rebuild
 pnpm install --frozen-lockfile
 
 # 2) 빌드 — TypeScript → dist/
@@ -151,9 +150,9 @@ pnpm run setup
   - `--target hermes` → Hermes config
   - `--target both`
   - `--target encrypted` → OS 저장소 대신 **암호화 파일 저장소**(`secrets.enc`)에 비밀번호 저장. 헤드리스 서버용 — [아래](#헤드리스-서버-암호화-백엔드) 참고.
-- 셋업 끝에 `doctor` 점검이 돌며 인증·브라우저·API 상태를 확인합니다(`--no-doctor`로 생략). `doctor`는 어떤 자격증명 백엔드가 선택됐고 비밀번호가 조회되는지도 함께 보고합니다.
+- 셋업 끝에 `doctor` 점검이 돌며 인증·HTTP API 상태를 확인합니다(`--no-doctor`로 생략). `doctor`는 어떤 자격증명 백엔드가 선택됐고 비밀번호가 조회되는지도 함께 보고합니다.
 - 기존 Hermes 호환용 `--allow-plaintext-env`는 비밀번호만 설정 파일에 명시적으로
-  저장합니다. Canvas 토큰과 브라우저 세션은 계속 secure backend에 저장되므로
+  저장합니다. Canvas 토큰과 HTTP 세션은 계속 secure backend에 저장되므로
   keytar 또는 마스터 키가 주입된 encrypted backend가 반드시 필요합니다.
 
 이전 버전이 프로젝트의 부모 디렉터리에 만든 `.mcp.json`은 프로젝트 루트 파일이
@@ -353,7 +352,7 @@ HTTP 노출, Canvas 액세스 토큰 교체, tunnel 키 최소 권한, 사고 �
 | 시험 시간표 PDF 파싱이 비어 있음 | `pdftotext`(poppler)가 없을 때입니다. macOS는 `brew install poppler`. 다른 기능은 정상 동작합니다. |
 | 첫 실행 시 키체인 접근 권한 요청 | OS 자격증명 저장소 접근 권한을 허용해야 토큰을 캐시할 수 있습니다. |
 | 헤드리스 서버에서 비밀번호를 못 찾음(`Password not found ... backend=...`) | Keychain/D-Bus가 없는 환경입니다. `pnpm run setup -- --target encrypted --generate-master-key-file <path>`로 암호화 저장소와 키 파일을 만들고, 실행 시 `ECLASS_CREDENTIAL_BACKEND=encrypted`와 `ECLASS_SECRET_KEY_FILE=<path>`를 주입하세요. 오류 메시지가 활성 백엔드와 다음 조치를 알려줍니다. [암호화 백엔드](#헤드리스-서버-암호화-백엔드) 참고. |
-| 로그인·인증이 계속 실패 | `pnpm run doctor`로 인증·브라우저·API·자격증명 백엔드 상태를 점검하세요. |
+| 로그인·인증이 계속 실패 | `pnpm run doctor`로 인증·HTTP API·자격증명 백엔드 상태를 점검하세요. |
 
 ## 개발
 
@@ -363,7 +362,7 @@ pnpm run dev:http # tsx로 HTTP /mcp 개발 서버 실행 (:8787)
 pnpm test         # node --test 기반 전체 테스트
 pnpm run build    # 타입체크 겸 빌드
 pnpm run start:http # 빌드된 HTTP /mcp 서버 실행 (:8787)
-pnpm run doctor   # 인증/브라우저/API 사전 점검
+pnpm run doctor   # 인증/HTTP API 사전 점검
 pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 ```
 
@@ -371,7 +370,7 @@ pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 추가하거나 기존 테스트를 수정할 때는 다음 기준을 따릅니다.
 
 - 오류 문구·진단 로그 형식 대신 오류 코드·타입, 종료 상태, 반환 데이터와 저장 결과를 확인합니다.
-- 실행 명령이나 API·브라우저 경로를 고정하기보다 실제 MCP 연결, 자료 반환, 제출 결과를 확인합니다.
+- 실행 명령이나 HTTP·제출 경로를 고정하기보다 실제 MCP 연결, 자료 반환, 제출 결과를 확인합니다.
 - 과거 디버깅 방식의 흔적, 폐기된 필드의 부재, 개발 문서의 특정 키워드만 검사하는 테스트는 만들지 않습니다.
 - 비밀값 누출, 중복 제출, 잘못된 자료 반환, 기존 데이터 손실을 막는 검사는 유지합니다. 호출 횟수·순서는 실제 부작용을 막는 데 필요한 경우에만 고정합니다.
 
@@ -384,6 +383,8 @@ pnpm run discover # 엔드포인트 디스커버리 (docs/DISCOVERY.md)
 - [`docs/SELF_REPAIR.md`](docs/SELF_REPAIR.md) — 시험 파서 등 자가 점검·복구 절차
 - [`docs/SYLLABUS.md`](docs/SYLLABUS.md) — 강의계획서 검색·OZ 데이터 경로
 - [`docs/HTTP-SESSION.md`](docs/HTTP-SESSION.md) — HTTP 인증 세션·쿠키·토큰
+- [`docs/HTTP-MATERIALS.md`](docs/HTTP-MATERIALS.md) — HTTP 자료 수집·LTI 런치·OCS 문서 경로
+- [`docs/PLAYWRIGHT-FREE-SCOPE.md`](docs/PLAYWRIGHT-FREE-SCOPE.md) — HTTP 전환 범위와 운영 경로
 
 ## Claude Code 스킬 (선택)
 

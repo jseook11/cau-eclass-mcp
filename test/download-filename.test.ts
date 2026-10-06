@@ -1,3 +1,4 @@
+import { HttpSession } from '../src/http-session.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -70,36 +71,14 @@ for (const route of ['direct', 'OCS'] as const) {
           localPath = result.local_path;
         } else {
           const viewerUrl = 'https://ocs.cau.ac.kr/em/fixture';
-          const fileUrl = 'https://ocs.cau.ac.kr/slides.pdf';
-          const events = new Map<string, (response: unknown) => void>();
-          const page = {
-            on: (event: string, callback: (response: unknown) => void) => events.set(event, callback),
-            url: () => viewerUrl,
-            async goto() {
-              events.get('response')!({
-                url: () => fileUrl,
-                status: () => 200,
-                headers: () => responseHeaders,
-                request: () => ({ resourceType: () => 'fetch' }),
-              });
-            },
+          globalThis.fetch = async (input) => {
+            const url = String(input);
+            if (url.includes('/content.php?')) return new Response(`<content><content_id>fixture</content_id><content_type>sharedocs</content_type><content_download_uri>/index.php?module=xn_media_content2013&amp;act=dispXn_media_content2013DownloadWebFile&amp;content_id=fixture</content_download_uri></content>`);
+            assert.ok(url.startsWith('https://ocs.cau.ac.kr/index.php?'));
+            return new Response(bytes, { headers: responseHeaders });
           };
-          const context = {
-            newPage: async () => page,
-            on() {},
-            request: {
-              async get(url: string) {
-                assert.equal(url, fileUrl);
-                return { ok: () => true, headers: () => responseHeaders, body: async () => bytes };
-              },
-            },
-          };
-          const session = new BrowserSession('tester', async () => 'unused');
-          Object.assign(session, {
-            ensurePlaywrightReady: async () => {},
-            getClient: async () => ({}),
-            withAuthenticatedContext: async (_label: string, _options: unknown, fn: (ctx: typeof context) => Promise<string>) => fn(context),
-          });
+          const session = new BrowserSession('tester', async () => { throw new Error('Unexpected login'); });
+          Object.assign(session, { withHttpSession: async (fn: (http: HttpSession) => Promise<string>) => fn(new HttpSession()), ensurePlaywrightReady: async () => { throw new Error('Unexpected browser launch'); } });
           localPath = await session.downloadCourseresourceFile(1, 'resource', name, dir, viewerUrl);
         }
 
