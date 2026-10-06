@@ -3,6 +3,12 @@
 eclass의 비표준 엔드포인트를 파악할 때 쓰는 개발용 도구. MCP 툴이 아니며 CLI로 직접 실행한다.
 새 기능(과제 제출, 성적 등)을 구현하기 전에 실제 엔드포인트/폼 구조를 여기서 먼저 확인한다.
 
+## 로그인·SSO HTTP 재현 기록
+
+[HTTP-LOGIN-DISCOVERY.md](HTTP-LOGIN-DISCOVERY.md)에 2026-10-05의 실제 로그인 검증을 기록했다.
+요청 순서, `OnLogon()`과 RSA 복호화 처리, 실패한 시도와 수정, 최종 실행 결과를 포함한다.
+재현 명령은 `pnpm exec tsx scripts/probe-http-login.ts`다.
+
 ## 보안 원칙 (코드로 강제됨)
 
 - 캡처 출력에 자격증명이 절대 포함되지 않는다:
