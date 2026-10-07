@@ -28,7 +28,7 @@ import { redactUrl } from './discovery/redact.js';
 import { debugLog } from './secrets.js';
 import { fetchModulebuilderViaApi, fetchCourseResourceViaApi } from './learningx-client.js';
 import type { LaunchArtifact } from './external-tool-launch.js';
-import { downloadOcsDocument, resolveHttpExternalTool } from './http-materials.js';
+import { downloadOcsDocument, resolveHttpExternalTool, fetchLearningxBoardMaterials, type LearningxBoardLocation } from './http-materials.js';
 export { parseLearningxBoardLocation, parseLearningxBoardPostAttachment } from './http-materials.js';
 
 const BASE_URL = CANVAS_BASE_URL;
@@ -770,6 +770,11 @@ export class BrowserSession {
   ): Promise<string> {
     if (!viewUrl) throw new Error(`Resource ${resourceId} has no viewUrl`);
     return this.withHttpSession(session => downloadOcsDocument(courseId, resourceId, displayName, downloadDir, viewUrl, session));
+  }
+
+  async fetchLearningxBoardMaterials(courseId: number, board: LearningxBoardLocation): Promise<ResourceItem[]> {
+    const client = await this.getClient();
+    return this.withHttpSession(session => fetchLearningxBoardMaterials(session, client, courseId, board));
   }
 
   async resolveExternalToolLaunch(courseId: number, moduleItemUrl: string): Promise<LaunchArtifact> {

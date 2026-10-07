@@ -29,10 +29,20 @@ POST 이후 같은 주소의 GET이 필요한 흐름은 별도로 탐색한다. 
 `EXTERNAL_TOOL_NO_ARTIFACT`를 반환한다.
 
 게시판은 목록의 `pagination.last_page`를 따라 최대 20페이지·게시글 상세 50건·60초의 범위에서 읽고,
-비밀글·첨부 없는 글을 건너뛴 뒤 같은 origin의 Canvas 파일 첨부를 선택한다.
-특정 글의 URL이면 그 글만 조회한다. 주차학습 래퍼는 요청한 module item ID로
+비밀글·첨부 없는 글을 건너뛴 뒤 모든 게시글의 모든 Canvas 파일 첨부를 수집한다.
+`eclass_get_materials`는 같은 게시판을 가리키는 주차 링크들을 요청당 한 번만 조회하고,
+링크 ID 대신 실제 Canvas 파일 ID로 자료를 펼쳐 중복을 합친다. 첨부 URL의 인증 쿼리는 유지한다.
+게시판은 매 조회마다 새로 읽으므로 새 게시글·추가 첨부가 링크 해석 캐시에 가려지지 않는다.
+잠긴 링크는 조회하지 않으며, 게시판 조회가 실패하면 소스 오류와 미해결 링크를 반환한다.
+단일 파일 런치 도구에 여러 첨부를 가진 게시판을 전달하면 첫 파일을 임의로 선택하지 않고
+`EXTERNAL_TOOL_MULTIPLE_ARTIFACTS`로 자료 목록 조회를 안내한다.
+특정 글의 URL이면 그 글의 모든 첨부를 조회한다. 주차학습 래퍼는 요청한 module item ID로
 modules 응답을 찾아 OCS locator 또는 영상 여부를 반환한다.
 읽기 경로는 진도·출석 기록 API를 호출하지 않는다.
+
+Canvas 파일 다운로드는 HTTP 200이어도 HTML Content-Type, HTML 본문, 빈 파일을
+거부하며 다운로드 기록을 만들지 않는다. PDF/PPTX 확장자만으로 로그인 페이지를
+정상 문서로 취급하지 않는다.
 
 `ExternalTool` 타입 또는 입력의 `requires_launch`가 런치 해석을 선택한다.
 자료 목록에는 타입·locator·획득 정책이 담긴다.

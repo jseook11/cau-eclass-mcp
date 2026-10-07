@@ -4,6 +4,7 @@ import { BrowserSession, isStreamingMediaType } from '../browser-session.js';
 import { FileCache } from '../file-cache.js';
 import { classifyMaterial, materialFingerprint, type MaterialAcquisition } from '../material-acquisition.js';
 import { resolveMaterial } from '../resolve-material.js';
+import { parseLearningxBoardLocation } from '../http-materials.js';
 
 const BASE_URL = 'https://eclass3.cau.ac.kr';
 
@@ -351,10 +352,11 @@ const SOURCE_PRIORITY: MaterialSource[] = [
 
 function materialIdentityKeys(material: Material): string[] {
   const keys: string[] = [];
-  if (material.id) keys.push(`source:${material.source}:id:${material.id}`);
+  if (material.id && !material.canvas_file_id) keys.push(`source:${material.source}:id:${material.id}`);
   if (material.canvas_file_id) keys.push(`canvas-file:${material.canvas_file_id}`);
   if (
     material.id
+    && !material.canvas_file_id
     && (material.source === 'modulebuilder' || material.source === 'external')
   ) {
     keys.push(`module-item:${material.id}`);
@@ -610,6 +612,36 @@ export async function getMaterials(
     }
   }
 
+  // A board link is a collection, not the attachment of its newest post.
+  // Refresh each collection once per call; wrapper resolution/download caches
+  // cannot observe new posts or changes to a post's attachment list.
+  const failedBoards = new Set<string>();
+  const boardReads = new Map<string, Promise<Material[]>>();
+  const expanded: Material[] = [];
+  for (const material of materials) {
+    const board = material.type === 'ExternalTool' && material.external_url
+      ? parseLearningxBoardLocation(material.external_url) : null;
+    if (!board || classifyMaterial(material).acquisition_policy === 'not_open') {
+      expanded.push(material);
+      continue;
+    }
+    const key = `${board.boardId}:${board.postId ?? ''}`;
+    let read = boardReads.get(key);
+    if (!read) {
+      read = session.fetchLearningxBoardMaterials(courseId, board).then(files => files.map(file => ({
+        ...file, canvas_file_id: file.id, source: material.source,
+      })));
+      boardReads.set(key, read);
+    }
+    try { expanded.push(...await read); }
+    catch (err) {
+      if (!failedBoards.has(key)) errors.push(toMaterialIssue(material.source, err));
+      failedBoards.add(key);
+      expanded.push(material);
+    }
+  }
+  materials.splice(0, materials.length, ...expanded);
+
   if (cache) {
     let cacheWarning: MaterialFetchWarning | null = null;
     for (const m of materials) {
@@ -633,6 +665,8 @@ export async function getMaterials(
   for (const material of merged) {
     Object.assign(material, classifyMaterial(material));
     material.fingerprint = materialFingerprint(material);
+    const board = material.external_url ? parseLearningxBoardLocation(material.external_url) : null;
+    if (board && failedBoards.has(`${board.boardId}:${board.postId ?? ''}`)) continue;
     // Prefer semantic evidence from the source list over a historical launch.
     if (material.acquisition_policy !== 'needs_resolution'
         || (material.type !== 'ExternalTool' && !isVerifiedOcsViewerUrl(material.url ?? ''))) continue;

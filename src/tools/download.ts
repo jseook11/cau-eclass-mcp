@@ -11,6 +11,7 @@ import { downloadFileToDisk, validateCachedDownload } from './download-file.js';
 import { acquisitionError, acquisitionStatus, classifyMaterial, AcquisitionError, materialFingerprint, type MaterialAcquisition, type AcquisitionStatus } from '../material-acquisition.js';
 import { resolveMaterial } from '../resolve-material.js';
 import { sanitizeFileName } from '../utils.js';
+import { parseLearningxBoardLocation } from '../http-materials.js';
 import {
   isCanvasModuleItemUrl,
   isExternalToolLaunchRequested,
@@ -88,7 +89,8 @@ async function resolveExternalToolLocator(deps: DownloadDeps, item: DownloadItem
   const cached = typeof deps.fileCache.getResolvedLocator === 'function'
     ? deps.fileCache.getResolvedLocator(item.file_id)
     : undefined;
-  if (cached?.resolved_url && cached.course_id === item.course_id && cached.fingerprint === materialFingerprint(item)) return cached;
+  const board = item.external_url ? parseLearningxBoardLocation(item.external_url) : null;
+  if (!board && cached?.resolved_url && cached.course_id === item.course_id && cached.fingerprint === materialFingerprint(item)) return cached;
 
   const currentUrl = item.url;
   const knownDocument = classifyMaterial(item).asset_kind === 'document'
@@ -212,7 +214,8 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
   }
 
   // Unclassified wrappers must resolve before any download cache can satisfy them.
-  const cached = item.type === 'ExternalTool' && inferred.asset_kind === 'unresolved' && acquisition.asset_kind !== 'document'
+  const board = item.external_url ? parseLearningxBoardLocation(item.external_url) : null;
+  const cached = board || (item.type === 'ExternalTool' && inferred.asset_kind === 'unresolved' && acquisition.asset_kind !== 'document')
     ? null : await validateCachedDownload(deps.fileCache, item);
   if (cached) {
     return {
@@ -291,7 +294,7 @@ export async function downloadOne(deps: DownloadDeps, item: DownloadItem): Promi
   } catch (err) {
     const error = acquisitionError(err);
     if (error.code === 'MATERIAL_NOT_OPEN') return excluded(item, strategy, 'not_open', error.reason, error.code);
-    if (error.code === 'EXTERNAL_TOOL_NO_ARTIFACT') return excluded(item, strategy, 'needs_resolution', error.reason, error.code);
+    if (error.code === 'EXTERNAL_TOOL_NO_ARTIFACT' || error.code === 'EXTERNAL_TOOL_MULTIPLE_ARTIFACTS') return excluded(item, strategy, 'needs_resolution', error.reason, error.code);
     if (error.code === 'EXTERNAL_TOOL_VIDEO') return excluded(item, strategy, 'excluded_video', error.reason, error.code);
     return failed(item, strategy, error.code, error.reason, error.retryable);
   }

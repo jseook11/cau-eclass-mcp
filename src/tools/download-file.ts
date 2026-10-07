@@ -135,6 +135,11 @@ export async function downloadFileToDisk(
     throw new Error(`Download failed: ${response.status}`);
   }
 
+  if (/text\/html|application\/xhtml\+xml/i.test(response.headers.get('content-type') ?? '')) {
+    await response.body?.cancel();
+    throw new Error('Download rejected: HTML response instead of file');
+  }
+
   const resolvedName = resolveDownloadFilename(safeName, {
     contentDisposition: response.headers.get('content-disposition'),
     contentType: response.headers.get('content-type'),
@@ -142,7 +147,12 @@ export async function downloadFileToDisk(
   const localPath = path.join(dir, resolvedName);
 
   const buffer = await response.arrayBuffer();
-  await fs.writeFile(localPath, Buffer.from(buffer));
+  const bytes = Buffer.from(buffer);
+  if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(bytes.subarray(0, 512).toString('utf8').replace(/^\uFEFF/, ''))) {
+    throw new Error('Download rejected: HTML body instead of file');
+  }
+  if (bytes.length === 0) throw new Error('Download rejected: empty file');
+  await fs.writeFile(localPath, bytes);
 
   return { local_path: localPath, size_bytes: buffer.byteLength };
 }

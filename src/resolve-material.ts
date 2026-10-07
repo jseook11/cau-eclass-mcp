@@ -1,6 +1,7 @@
 import type { FileCache, MaterialResolution } from './file-cache.js';
 import type { BrowserSession } from './browser-session.js';
 import { acquisitionError, classifyLaunchArtifact, materialFingerprint, type AcquisitionInput } from './material-acquisition.js';
+import { parseLearningxBoardLocation } from './http-materials.js';
 
 /** Resolve the wrapper's purpose without writing a downloaded artifact. */
 export async function resolveMaterial(
@@ -9,7 +10,8 @@ export async function resolveMaterial(
   const fileId = input.id ?? input.file_id!;
   const fingerprint = materialFingerprint(input);
   const previous = cache?.getMaterialResolution?.(courseId, fileId, fingerprint);
-  if (previous && !previous.retryable && previous.acquisition_policy !== 'not_open') return previous;
+  const board = input.external_url ? parseLearningxBoardLocation(input.external_url) : null;
+  if (!board && previous && !previous.retryable && previous.acquisition_policy !== 'not_open') return previous;
   let result: MaterialResolution;
   try {
     const artifact = await session.resolveExternalToolLaunch(courseId, input.url!);

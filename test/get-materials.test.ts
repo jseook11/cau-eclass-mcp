@@ -44,6 +44,53 @@ function mockCache(get: (fileId: string) => unknown): FileCache {
   return { get } as FileCache;
 }
 
+test('shared weekly board links expand once into current file identities and bypass stale wrapper caches', async () => {
+  let reads = 0;
+  let ids = ['55', '56'];
+  const client = mockClient(async () => [1, 2, 3, 4].map(week => ({ id: week, name: `${week}주차`, items: [{
+    id: 10 + week, title: '강의 슬라이드', type: 'ExternalTool',
+    html_url: `/courses/1/modules/items/${10 + week}`,
+    external_url: 'https://eclass3.cau.ac.kr/learningx/lti/learningx_board/boards/77',
+  }] })));
+  const session = mockSession({
+    fetchLearningxBoardMaterials: async () => { reads++; return ids.map(id => ({ id, title: `${id}.pdf`, type: 'pdf', url: `https://eclass3.cau.ac.kr/files/${id}/download?verifier=fixture` })); },
+    resolveExternalToolLaunch: async () => { throw new Error('must not resolve board as a single file'); },
+  });
+  const cache = mockCache(id => id === '55' ? { course_id: 1, local_path: '/cache/55.pdf' } : { course_id: 1, local_path: '/cache/stale-wrapper.pptx' });
+  const first = await getMaterials(client, session, 1, ['external'], cache, { resolveExternal: true });
+  assert.deepEqual(first.materials.map(m => m.id), ids);
+  assert.ok(first.materials.every(m => m.downloadable && m.canvas_file_id === m.id && !m.module_name));
+  assert.equal(reads, 1);
+  ids = [...ids, '57'];
+  const second = await getMaterials(client, session, 1, ['external'], cache, { resolveExternal: true });
+  assert.deepEqual(second.materials.map(m => m.id), ids);
+  assert.equal(reads, 2);
+});
+
+test('failed board discovery keeps the wrapper unresolved and reports the source error', async () => {
+  const result = await getMaterials(mockClient(async () => [{ id: 1, name: '1주차', items: [{
+    id: 11, title: 'slides', type: 'ExternalTool', html_url: '/courses/1/modules/items/11',
+    external_url: 'https://eclass3.cau.ac.kr/learningx/lti/learningx_board/boards/77',
+  }] }]), mockSession({ fetchLearningxBoardMaterials: async () => { throw new Error('LearningX HTTP 503'); },
+    resolveExternalToolLaunch: async () => { throw new Error('must not use stale resolution'); },
+  }), 1, ['external'], undefined, { resolveExternal: true });
+  assert.equal(result.materials[0].downloadable, false);
+  assert.equal(result.materials[0].acquisition_policy, 'needs_resolution');
+  assert.match(result.errors[0].reason, /503/);
+});
+
+test('Canvas attachment IDs cannot alias a locked external module item with the same numeric ID', async () => {
+  let reads = 0;
+  const result = await getMaterials(mockClient(async () => [
+    { id: 1, name: 'locked', state: 'locked', items: [{ id: 55, title: 'locked link', type: 'ExternalTool', html_url: '/courses/1/modules/items/55', external_url: 'https://eclass3.cau.ac.kr/learningx/lti/learningx_board/boards/77' }] },
+    { id: 2, name: 'open', items: [{ id: 56, title: 'open link', type: 'ExternalTool', html_url: '/courses/1/modules/items/56', external_url: 'https://eclass3.cau.ac.kr/learningx/lti/learningx_board/boards/77' }] },
+  ]), mockSession({ fetchLearningxBoardMaterials: async () => { reads++; return [{ id: '55', title: 'slides.pdf', type: 'pdf', url: 'https://eclass3.cau.ac.kr/files/55/download' }]; } }), 1, ['external']);
+  assert.equal(reads, 1);
+  assert.equal(result.materials.length, 2);
+  assert.equal(result.materials.find(m => m.canvas_file_id === '55')?.downloadable, true);
+  assert.equal(result.materials.find(m => m.type === 'ExternalTool')?.acquisition_policy, 'not_open');
+});
+
 test('getMaterials preserves announcement provenance when another source represents the attachment', async () => {
   const client = mockClient(async () => [{
     id: 20, title: '강의자료 안내', attachments: [{

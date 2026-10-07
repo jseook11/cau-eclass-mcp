@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { HttpSession } from '../src/http-session.js';
-import { downloadOcsDocument, parseOcsDocumentUrl, parseOcsFileViewerUrl, resolveHttpExternalTool } from '../src/http-materials.js';
+import { downloadOcsDocument, parseOcsDocumentUrl, parseOcsFileViewerUrl, resolveHttpExternalTool, fetchLearningxBoardMaterials } from '../src/http-materials.js';
 import type { CanvasClient } from '../src/canvas-client.js';
 const base = 'https://eclass3.cau.ac.kr';
 const wrapper = `${base}/courses/1/modules/items/11`;
@@ -22,6 +22,37 @@ function makeSession(routes: (url: string, init: RequestInit) => Response | Prom
 }
 const html = (text: string, headers?: Record<string,string>) => new Response(text, { headers: { 'content-type': 'text/html', ...headers } });
 const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+
+test('board discovery returns every attachment across posts and pages, retaining signed URLs', async () => {
+  const { session, calls } = makeSession(url => {
+    if (url === `${api}?page=1&per_page=100`) return json({ items: [{ id: 901, attachment_count: 2 }, { id: 900, attachment_count: 1, is_secret: true }], pagination: { last_page: 2 } });
+    if (url === `${api}/901`) return json({ attachments: [
+      { filename: '01.pdf', url: '/files/55/download?verifier=fixture', canvas_file_id: 55 },
+      { filename: '01_v2.pdf', url: '/files/56/download', canvas_file_id: 56 },
+    ] });
+    if (url === `${api}?page=2&per_page=100`) return json({ items: [{ id: 902, attachment_count: 1 }], pagination: { last_page: 2 } });
+    if (url === `${api}/902`) return json({ attachments: [{ filename: '02.pdf', url: '/files/57/download', canvas_file_id: 57 }] });
+    throw new Error('Unexpected endpoint');
+  });
+  session.cookieValue = () => 'fixture-token';
+  const files = await fetchLearningxBoardMaterials(session, unusedClient, 1, { boardId: '77' });
+  assert.deepEqual(files.map(f => f.id), ['55', '56', '57']);
+  assert.equal(files[0].url, `${base}/files/55/download?verifier=fixture`);
+  assert.ok(!calls.some(c => c.url === `${api}/900`));
+});
+
+test('a multi-file board wrapper cannot resolve to an arbitrary first attachment', async () => {
+  const { session } = makeSession(url => {
+    if (url === wrapper) return html(`<iframe src="${board}"></iframe>`);
+    if (url === board) return html('board', { 'set-cookie': 'xn_api_token=token; Path=/; Secure' });
+    if (url === `${api}?page=1&per_page=100`) return json({ items: [{ id: 901, attachment_count: 2 }], pagination: { last_page: 1 } });
+    if (url === `${api}/901`) return json({ attachments: [
+      { filename: '01.pdf', url: '/files/55/download' }, { filename: '02.pdf', url: '/files/56/download' },
+    ] });
+    throw new Error('Unexpected endpoint');
+  });
+  await assert.rejects(resolveHttpExternalTool(session, unusedClient, 1, wrapper), { code: 'EXTERNAL_TOOL_MULTIPLE_ARTIFACTS' });
+});
 
 test('OCS parser verifies identity, document type and download endpoint', () => {
   assert.match(parseOcsDocumentUrl('fixture', metadata()), /^https:\/\/ocs.cau.ac.kr\/index.php\?/);

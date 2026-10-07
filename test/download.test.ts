@@ -7,7 +7,29 @@ import * as path from 'node:path';
 import { downloadOne } from '../src/tools/download.js';
 import type { DownloadDeps } from '../src/tools/download.js';
 import type { DownloadRecord, ResolvedLocator } from '../src/file-cache.js';
-import { materialFingerprint } from '../src/material-acquisition.js';
+import { materialFingerprint, AcquisitionError } from '../src/material-acquisition.js';
+
+test('a board collection bypasses historical wrapper download, locator and resolution caches', async () => {
+  const cache = makeFileCache();
+  const item = { file_id: '11', course_id: 1, display_name: '강의 슬라이드', type: 'ExternalTool',
+    url: 'https://eclass3.cau.ac.kr/courses/1/modules/items/11',
+    external_url: 'https://eclass3.cau.ac.kr/learningx/lti/learningx_board/boards/77',
+    asset_kind: 'document' as const, downloadable: true, acquisition_policy: 'download' as const,
+  };
+  cache.records.push({ file_id: '11', course_id: 1, display_name: item.display_name, local_path: '/stale.pptx', size_bytes: 99, downloaded_at: new Date().toISOString() });
+  cache.locators.set('11', { file_id: '11', course_id: 1, resolved_url: 'https://eclass3.cau.ac.kr/files/55/download', fingerprint: materialFingerprint(item), resolved_at: new Date().toISOString() });
+  let launches = 0;
+  const result = await downloadOne({ session: { resolveExternalToolLaunch: async () => {
+    launches++;
+    throw new AcquisitionError('EXTERNAL_TOOL_MULTIPLE_ARTIFACTS', 'Use eclass_get_materials', false);
+  } }, fileCache: { ...cache, getMaterialResolution: () => ({
+    retryable: false, acquisition_policy: 'download', resolved_url: 'https://eclass3.cau.ac.kr/files/55/download',
+  }) }, token: 'tok' } as unknown as DownloadDeps, item);
+  assert.equal(launches, 1);
+  assert.equal(result.status, 'needs_resolution');
+  assert.equal(result.error_code, 'EXTERNAL_TOOL_MULTIPLE_ARTIFACTS');
+  assert.equal(cache.records.length, 1);
+});
 
 test('ExternalTool without an artifact returns needs_resolution instead of a retryable download failure', async () => {
   const result = await downloadOne({ session: {

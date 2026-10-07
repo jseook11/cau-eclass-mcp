@@ -12,6 +12,7 @@ import { classifyHttpArtifact, isOcsViewerUrl, type LaunchArtifact } from './ext
 import { AcquisitionError, acquisitionError } from './material-acquisition.js';
 import { extractOcsContentId } from './tools/download-video.js';
 import { resolveDownloadFilename } from './download-filename.js';
+import type { ResourceItem } from './types.js';
 import { expandTilde, materialStorageKey, sanitizeFileName } from './utils.js';
 const BASE_URL = 'https://eclass3.cau.ac.kr';
 const MAX_LAUNCH_PAGES = 40;
@@ -60,10 +61,11 @@ function canvasFileIdFromUrl(rawUrl: string): string | null {
   }
 }
 
-export function parseLearningxBoardPostAttachment(body: unknown): LaunchArtifact | null {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+function parseLearningxBoardPostAttachments(body: unknown): Array<LaunchArtifact & { fileId: string }> {
+  const result: Array<LaunchArtifact & { fileId: string }> = [];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return result;
   const detail = body as LearningxBoardPostDetail;
-  if (!Array.isArray(detail.attachments)) return null;
+  if (!Array.isArray(detail.attachments)) return result;
 
   for (const attachment of detail.attachments) {
     if (!attachment || typeof attachment !== 'object') continue;
@@ -82,15 +84,24 @@ export function parseLearningxBoardPostAttachment(body: unknown): LaunchArtifact
       : canvasFileIdFromUrl(attachmentUrl.toString());
     if (!fileId || !/^\d+$/.test(fileId)) continue;
 
-    return {
+    result.push({
       kind: 'file',
       url: attachmentUrl.toString(),
       type: filenameExtension(filename),
       filename,
-    };
+      fileId,
+    });
   }
 
-  return null;
+  return result;
+}
+
+export function parseLearningxBoardPostAttachment(body: unknown): LaunchArtifact | null {
+  const attachments = parseLearningxBoardPostAttachments(body);
+  if (attachments.length > 1) throw new AcquisitionError('EXTERNAL_TOOL_MULTIPLE_ARTIFACTS', 'Board post contains multiple files; list its attachments with eclass_get_materials', false);
+  if (!attachments[0]) return null;
+  const { fileId: _fileId, ...artifact } = attachments[0];
+  return artifact;
 }
 
 function xmlText(xml: string, name: string): string | null {
@@ -221,7 +232,13 @@ async function learningxJson(session: HttpSession, url: string, client: CanvasCl
   try { return JSON.parse(r.text); } catch { throw new AcquisitionError('EXTERNAL_TOOL_PROTOCOL_ERROR', 'Invalid LearningX JSON', false); }
 }
 
-async function boardAttachment(session: HttpSession, client: CanvasClient, courseId: number, board: LearningxBoardLocation): Promise<LaunchArtifact | null> {
+export async function fetchLearningxBoardMaterials(session: HttpSession, client: CanvasClient, courseId: number, board: LearningxBoardLocation): Promise<ResourceItem[]> {
+  const materials: ResourceItem[] = [];
+  const append = (body: unknown): void => {
+    for (const file of parseLearningxBoardPostAttachments(body)) {
+      materials.push({ id: file.fileId, title: file.filename!, type: file.type ?? 'file', url: file.url });
+    }
+  };
   const signal = AbortSignal.timeout(60_000);
   let details = 0;
   const read = async (url: string): Promise<unknown> => {
@@ -235,7 +252,7 @@ async function boardAttachment(session: HttpSession, client: CanvasClient, cours
     finally { signal.removeEventListener('abort', onAbort); }
   };
   const root = `${BASE_URL}/learningx/api/v1/learningx_board/courses/${courseId}/boards/${board.boardId}/posts`;
-  if (board.postId) return parseLearningxBoardPostAttachment(await read(`${root}/${board.postId}`));
+  if (board.postId) { append(await read(`${root}/${board.postId}`)); return materials; }
   for (let page = 1; page <= 20; page++) {
     const body = await read(`${root}?page=${page}&per_page=100`) as { items?: unknown[]; pagination?: { last_page?: number; current_page?: number; total?: number } };
     if (!body || !Array.isArray(body.items)) throw new AcquisitionError('EXTERNAL_TOOL_PROTOCOL_ERROR', 'Invalid LearningX board list', false);
@@ -245,15 +262,21 @@ async function boardAttachment(session: HttpSession, client: CanvasClient, cours
       if (row.is_secret === true || row.attachment_count === 0) continue;
       if (!/^\d+$/.test(String(row.id))) throw new AcquisitionError('EXTERNAL_TOOL_PROTOCOL_ERROR', 'Invalid LearningX post identity', false);
       if (++details > 50) throw new AcquisitionError('EXTERNAL_TOOL_LIMIT_REACHED', 'LearningX board detail limit reached', false);
-      const artifact = parseLearningxBoardPostAttachment(await read(`${root}/${row.id}`));
-      if (artifact) return artifact.kind === 'ocs_viewer' ? await resolveOcsArtifact(session, artifact.url) : artifact;
+      append(await read(`${root}/${row.id}`));
     }
     // Follow the server's page count. Without pagination, this is a complete list.
     const total = body.pagination?.last_page;
     if (total !== undefined && (!Number.isInteger(total) || total < 1)) throw new AcquisitionError('EXTERNAL_TOOL_PROTOCOL_ERROR', 'Invalid LearningX pagination', false);
-    if (total === undefined || page >= total || body.items.length === 0) return null;
+    if (total === undefined || page >= total || body.items.length === 0) return materials;
   }
   throw new AcquisitionError('EXTERNAL_TOOL_LIMIT_REACHED', 'LearningX board pagination limit reached', false);
+}
+
+async function boardAttachment(session: HttpSession, client: CanvasClient, courseId: number, board: LearningxBoardLocation): Promise<LaunchArtifact | null> {
+  const files = await fetchLearningxBoardMaterials(session, client, courseId, board);
+  if (files.length > 1) throw new AcquisitionError('EXTERNAL_TOOL_MULTIPLE_ARTIFACTS', 'Board contains multiple files; list its attachments with eclass_get_materials', false);
+  const file = files[0];
+  return file ? { kind: 'file', url: file.url!, type: file.type, filename: file.title } : null;
 }
 
 async function launchPage(session: HttpSession, url: string, init: RequestInit = {}): Promise<HttpResult> {

@@ -6,6 +6,28 @@ import * as path from 'node:path';
 
 import { downloadFile, validateCachedDownload } from '../src/tools/download-file.js';
 
+test('HTTP 200 HTML is rejected before file write or download registration, even with a PDF filename', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDir = process.env.ECLASS_DOWNLOAD_DIR;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'download-html-'));
+  process.env.ECLASS_DOWNLOAD_DIR = dir;
+  let records = 0;
+  try {
+    for (const contentType of ['text/html', 'application/octet-stream']) {
+      globalThis.fetch = (async () => new Response('<!DOCTYPE html><html>login</html>', { headers: { 'content-type': contentType } })) as typeof fetch;
+      await assert.rejects(downloadFile('55', 1, 'https://eclass3.cau.ac.kr/files/55/download', 'slides.pdf', 'token', {
+        get: () => null, record: () => { records++; },
+      } as never), /HTML/);
+    }
+    assert.equal(records, 0);
+    assert.ok(!(await fs.readdir(dir, { recursive: true })).some(f => f.endsWith('.pdf')));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDir === undefined) delete process.env.ECLASS_DOWNLOAD_DIR; else process.env.ECLASS_DOWNLOAD_DIR = originalDir;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('validateCachedDownload rejects another source ID with the same title', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'download-cache-same-title-'));
   const localPath = path.join(dir, 'other.pdf');
