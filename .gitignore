@@ -42,6 +42,7 @@ docs/*.hwp
 docs/*.docx
 docs/*.pptx
 docs/*.zip
+docs/parsing-test/*
 # internal agent planning artifacts (gstack/superpowers) stay local
 docs/superpowers/
 

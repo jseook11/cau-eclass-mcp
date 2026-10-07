@@ -32,7 +32,9 @@ export function parseCanvasAccountName(
 ): { college: string | null; department: string | null } {
   const trimmed = name?.trim();
   if (!trimmed) return { college: null, department: null };
-  const known = KNOWN_ACCOUNT_COLLEGE[trimmed];
+  // Object.hasOwn: an account literally named "constructor"/"toString" must not
+  // resolve to an inherited Object.prototype member.
+  const known = Object.hasOwn(KNOWN_ACCOUNT_COLLEGE, trimmed) ? KNOWN_ACCOUNT_COLLEGE[trimmed] : undefined;
   if (known) return known;
   const tokens = trimmed.split(/\s+/);
   if (tokens.length < 2 || !tokens[0].endsWith('대학')) return { college: null, department: null };

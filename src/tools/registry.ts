@@ -1,4 +1,5 @@
 import type { CallToolResult, Tool, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { normalizeToolError } from '../errors.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -354,7 +355,19 @@ const ECLASS_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
 };
 
 export function outputSchemaFor(name: string): Tool['outputSchema'] | undefined {
-  return ECLASS_OUTPUT_SCHEMAS[name] as Tool['outputSchema'] | undefined;
+  // Object.hasOwn: tool names like "constructor" must not resolve to an
+  // inherited Object.prototype member instead of a registered schema.
+  const schema = Object.hasOwn(ECLASS_OUTPUT_SCHEMAS, name) ? ECLASS_OUTPUT_SCHEMAS[name] : undefined;
+  if (!schema) return undefined;
+  return {
+    type: 'object',
+    // Keep properties visible to clients that use them for discovery.
+    properties: { ...schema.properties as Record<string, JsonSchema>, ...errorEnvelope },
+    anyOf: [
+      { ...schema, not: { properties: { ok: { const: false } }, required: ['ok'] } },
+      obj({ ...errorEnvelope, ok: { const: false } }, ['ok', 'error_code', 'message', 'retryable']),
+    ],
+  } as Tool['outputSchema'];
 }
 
 export function buildToolList(tools: Tool[]): Tool[] {
@@ -385,15 +398,20 @@ function parseJsonText(result: CallToolResult): JsonObject | undefined {
   }
 }
 
-export function jsonToolResult(value: unknown, options: { isError?: boolean } = {}): CallToolResult {
-  return {
-    ...(options.isError ? { isError: true } : {}),
-    structuredContent: toStructuredContent(value),
-    content: [{ type: 'text', text: JSON.stringify(value) }],
-  };
+export function listOutputSchemaNames(): string[] {
+  return Object.keys(ECLASS_OUTPUT_SCHEMAS);
 }
 
 export function normalizeToolResult(result: CallToolResult): CallToolResult {
+  if (result.isError) {
+    const text = result.content.find((item) => item.type === 'text');
+    const details = parseJsonText(result);
+    const error = normalizeToolError(
+      details,
+      details === undefined && text?.type === 'text' ? text.text : '도구 실행에 실패했습니다.',
+    );
+    return { ...result, structuredContent: error, content: [{ type: 'text', text: JSON.stringify(error) }] };
+  }
   const structuredContent = parseJsonText(result);
   if (structuredContent === undefined) return result;
   return {

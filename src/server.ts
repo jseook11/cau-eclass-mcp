@@ -32,7 +32,7 @@ import { listExamSources } from './tools/exams/list-exam-sources.js';
 import { normalizeExamTerm, parseExamTerm } from './academic-term.js';
 import { searchSyllabusList, getSyllabus } from './mportal-client.js';
 import { runDoctor } from './doctor.js';
-import { sanitizeDebug } from './errors.js';
+import { sanitizeDebug, toErrorResult } from './errors.js';
 import { buildToolList, normalizeToolResult } from './tools/registry.js';
 
 const LOCAL_FILE_HANDOFF_NOTE =
@@ -592,8 +592,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       switch (name) {
       case 'eclass_get_courses': {
-        const client = await session.getClient();
         const parsed = GetCoursesSchema.parse(args ?? {});
+        const client = await session.getClient();
         const courses = await getCourses(client, { scope: parsed.scope });
         if (parsed.scope === 'current') {
           fileCache.replaceCurrentCourses(courses);
@@ -633,8 +633,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_get_assignments': {
-        const client = await session.getClient();
         const parsed = GetAssignmentsSchema.parse(args ?? {});
+        const client = await session.getClient();
         const assignments = await getAssignments(
           client,
           parsed.course_id,
@@ -647,8 +647,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_get_assignment_detail': {
-        const client = await session.getClient();
         const parsed = GetAssignmentDetailSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await getAssignmentDetail(client, parsed.course_id, parsed.assignment_id);
         return {
           isError: result.ok === false,
@@ -657,8 +657,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_get_grades': {
-        const client = await session.getClient();
         const parsed = GetGradesSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await getGrades(client, parsed.course_id, parsed.include_assignments);
         return {
           isError: !result.ok,
@@ -667,8 +667,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_sync_course_metadata': {
-        const client = await session.getClient();
         const parsed = SyncCourseMetadataSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await syncCourseMetadata(examCache, client, parsed);
         return {
           isError: !result.ok,
@@ -736,8 +736,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_submit_assignment': {
-        const client = await session.getClient();
         const parsed = SubmitAssignmentSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await submitAssignment(client, session, parsed);
         return {
           isError: !result.ok,
@@ -754,8 +754,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_export_course_snapshot': {
-        const client = await session.getClient();
         const parsed = ExportSnapshotSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await exportCourseSnapshot(
           { client, session, fileCache },
           {
@@ -773,8 +773,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_get_announcements': {
-        const client = await session.getClient();
         const parsed = GetAnnouncementsSchema.parse(args ?? {});
+        const client = await session.getClient();
         const announcements = await getAnnouncements(client, parsed.course_id, parsed.limit);
         return {
           content: [{ type: 'text', text: JSON.stringify(announcements) }],
@@ -782,8 +782,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_get_materials': {
-        const client = await session.getClient();
         const parsed = GetMaterialsSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await getMaterials(
           client,
           session,
@@ -799,8 +799,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_download_file': {
-        const client = await session.getClient();
         const parsed = GetDownloadFileSchema.parse(args ?? {});
+        const client = await session.getClient();
 
         const outcome = await downloadOne(
           { session, fileCache, token: client.getToken() },
@@ -833,8 +833,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'eclass_download_materials_batch': {
-        const client = await session.getClient();
         const parsed = DownloadBatchSchema.parse(args ?? {});
+        const client = await session.getClient();
         const result = await downloadMaterialsBatch(
           { session, fileCache, token: client.getToken() },
           parsed.course_id,
@@ -885,7 +885,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const count = fileCache.removeCourse(parsed.course_id);
           return { content: [{ type: 'text', text: JSON.stringify({ removed: count, course_id: parsed.course_id }) }] };
         } else {
-          return { isError: true, content: [{ type: 'text', text: 'file_id 또는 course_id 중 하나를 지정해주세요' }] };
+          return { isError: true, content: [{ type: 'text', text: JSON.stringify(toErrorResult('INVALID_INPUT', 'file_id 또는 course_id 중 하나를 지정해주세요', { retryable: false })) }] };
         }
       }
 
@@ -912,7 +912,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       default:
         return {
           isError: true,
-          content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+          content: [{ type: 'text', text: JSON.stringify(toErrorResult('UNKNOWN_TOOL', `Unknown tool: ${sanitizeDebug(name)}`, { retryable: false })) }],
         };
     }
     } catch (err) {
@@ -920,16 +920,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (err instanceof z.ZodError && (name === 'eclass_sync_exam_schedules' || name === 'eclass_get_exam_schedule')) {
         const invalidTerm = err.issues.some((issue) => issue.path[0] === 'term');
         const error = {
-          ok: false,
+          ...toErrorResult(invalidTerm ? 'INVALID_EXAM_TERM' : 'INVALID_INPUT', '입력값이 올바르지 않습니다.', { retryable: false }),
           reason: invalidTerm ? 'INVALID_EXAM_TERM' : 'INVALID_INPUT',
-          message: sanitizeDebug(message),
+          validation_errors: err.issues.map((issue) => ({ path: issue.path, code: issue.code, message: sanitizeDebug(issue.message) })),
           ...(name === 'eclass_get_exam_schedule' ? { mode: 'local', candidates: [] } : {}),
+        };
+        return { isError: true, content: [{ type: 'text', text: JSON.stringify(error) }] };
+      }
+      if (err instanceof z.ZodError) {
+        const error = {
+          ...toErrorResult('INVALID_INPUT', '입력값이 올바르지 않습니다.', { retryable: false }),
+          validation_errors: err.issues.map((issue) => ({ path: issue.path, code: issue.code, message: sanitizeDebug(issue.message) })),
         };
         return { isError: true, content: [{ type: 'text', text: JSON.stringify(error) }] };
       }
       return {
         isError: true,
-        content: [{ type: 'text', text: sanitizeDebug(message) }],
+        content: [{ type: 'text', text: JSON.stringify(toErrorResult('TOOL_ERROR', '도구 실행에 실패했습니다.', { err: message })) }],
       };
     }
   })();

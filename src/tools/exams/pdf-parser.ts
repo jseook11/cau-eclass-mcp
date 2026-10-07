@@ -13,7 +13,7 @@ interface TsvWord {
   text: string;
 }
 
-type PdfLayout = 'general_education' | 'software_college' | 'business_economics';
+type PdfLayout = 'general_education' | 'software_college' | 'business_economics' | 'grid' | 'generic';
 
 export type ParseExamPdfResult = {
   ok: true;
@@ -145,6 +145,14 @@ function toIsoDate(value: string | null, term?: string): string | null {
   if (!value) return null;
   const match = /(\d{4})[-.](\d{1,2})[-.](\d{1,2})/.exec(value);
   if (match) return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  const koreanDate = /(\d{1,2})\s*월\s*(\d{1,2})\s*일/.exec(value);
+  if (koreanDate) {
+    const academicTerm = term ? parseExamTerm(term) : null;
+    if (!academicTerm) return null;
+    const month = Number(koreanDate[1]);
+    const year = academicTerm.year + (academicTerm.semester === 'W' && month <= 2 ? 1 : 0);
+    return `${year}-${koreanDate[1].padStart(2, '0')}-${koreanDate[2].padStart(2, '0')}`;
+  }
   const shortDate = /^(\d{1,2})\/(\d{1,2})(?:\([월화수목금토일]\))?$/.exec(value.replace(/\s+/g, ''));
   const academicTerm = term ? parseExamTerm(term) : null;
   if (!shortDate || !academicTerm) return null;
@@ -333,6 +341,424 @@ function parseBusinessEconomicsLine(
   };
 }
 
+// --- Layout-agnostic extraction -------------------------------------------------
+// Unknown layouts (other colleges, new print variants) are not rejected: rows are
+// segmented generically and dumped with best-effort fields plus the full raw text.
+// Field names come from content patterns, never from fixed column coordinates.
+const GENERIC_METHOD = /(?:\d\.\s*)?(온라인\s*(?:\(\s*비대면\s*\))?\s*시험|비대면\s*시험|대면\s*시험|과제물\s*대체|미실시|기타)/;
+const GENERIC_DATE = /\d{4}[-.]\d{1,2}[-.]\d{1,2}|\d{1,2}\s*월\s*\d{1,2}\s*일|\d{1,2}\/\d{1,2}/;
+const GENERIC_TIME = /\b\d{1,2}:\d{2}\b/g;
+const GENERIC_CODE = /(?<!\d)\d{5}(?!\d)/;
+// A row may declare its own term (e.g. business tables: "2026 1 <code> ...").
+const GENERIC_TERM = /^\s*(20\d{2})\s*[- ]\s*([12SW])\b(?![-./]\d)/;
+const GENERIC_LECTURE_TIME = /(?:^|[\s/])[월화수목금토일]\s*\(?\d/;
+const GENERIC_CELL_GAP = 4;
+// Meta labels that are not course names, so a code-less row is not mistaken for a
+// course (e.g. a bare notice line) when the name falls back to cell heuristics.
+const GENERIC_NON_COURSE = /안내|제출\s*기한|공지|문의|유의|붙임|첨부|지도\s*교수|확인\s*방법|시간표|작성|기재|예시|삭제|양식|e-?class|포탈|로그인|바로가기|http/i;
+const GENERIC_HEADER_TOKENS = [
+  '교과목코드', '분반', '교과목명', '강의시간', '교수명', '시험실시방법', '중간시험', '기말시험',
+  '시험유형', '시험 유형', '시험일자', '시험 일자', '시작시간', '종료시간', '건물번호', '고사실',
+  '비고', '연번', '개설대학명', '개설학과명', '개설전공명', '이수구분', '강의실', '수강인원', '캠퍼스', '학점', '건물번',
+];
+
+function isGenericHeaderLine(text: string): boolean {
+  const hits = GENERIC_HEADER_TOKENS.filter((token) => text.includes(token)).length;
+  return hits >= 2 || /유의사항|양식\s*및|Description|상세\s*작성/.test(text);
+}
+
+function splitGenericCells(line: TsvWord[]): string[] {
+  const cells: string[] = [];
+  let current: TsvWord[] = [];
+  let previousRight: number | null = null;
+  for (const word of line) {
+    if (previousRight !== null && word.left - previousRight > GENERIC_CELL_GAP) {
+      const cell = normalizeCell(current);
+      if (cell) cells.push(cell);
+      current = [word];
+    } else {
+      current.push(word);
+    }
+    previousRight = word.left + word.width;
+  }
+  const cell = normalizeCell(current);
+  if (cell) cells.push(cell);
+  return cells;
+}
+
+function normalizeGenericMethod(value: string | undefined): string | null {
+  if (!value) return null;
+  if (/온라인|비대면/.test(value)) return '온라인시험';
+  if (/대면/.test(value)) return '대면시험';
+  if (/과제물/.test(value)) return '과제물대체';
+  if (/미실시/.test(value)) return '미실시';
+  if (/기타/.test(value)) return '기타';
+  return value;
+}
+
+interface HeaderBound { key: string; lo: number; hi: number; }
+
+const HEADER_KEY_PATTERNS: Array<[RegExp, string]> = [
+  [/교과목\s*코드/, 'code'],
+  [/분반/, 'section'],
+  [/교과목\s*명/, 'name'],
+  [/강의시간/, 'lecture_time'],
+  [/교수명/, 'instructor'],
+  [/시작시간/, 'start'],
+  [/종료시간/, 'end'],
+  [/건물\s*번/, 'building'],
+  [/고사실/, 'rooms'],
+  [/비고/, 'note'],
+  [/시험\s*(?:실시\s*방법|유형)/, 'method'],
+  [/시험\s*일자|시험일/, 'date'],
+];
+
+function headerKeyFor(label: string): string | null {
+  for (const [pattern, key] of HEADER_KEY_PATTERNS) if (pattern.test(label)) return key;
+  return null;
+}
+
+function headerLabel(words: TsvWord[]): string {
+  return words.slice().sort((a, b) => a.top - b.top || a.left - b.left).map((word) => word.text).join('');
+}
+
+// Merge the (often multi-line) header row into column boundaries keyed by field,
+// so typed fields come from the header's meaning rather than fixed coordinates.
+function detectHeaderBounds(words: TsvWord[]): HeaderBound[] {
+  const lines = groupVisualLines(words);
+  let index = -1;
+  let best = 0;
+  lines.forEach((line, i) => {
+    const text = normalizeCell(line) ?? '';
+    const hits = GENERIC_HEADER_TOKENS.filter((token) => text.includes(token)).length;
+    if (hits > best) { best = hits; index = i; }
+  });
+  if (index < 0 || best < 3) return [];
+  const top = lines[index][0].top;
+  const page = lines[index][0].page_num;
+  const tokens: TsvWord[] = [];
+  for (const line of lines) {
+    if (line[0].page_num !== page || Math.abs(line[0].top - top) > 80) continue;
+    const text = normalizeCell(line) ?? '';
+    const hits = GENERIC_HEADER_TOKENS.filter((token) => text.includes(token)).length;
+    // Header labels may be stacked over several lines; exclude note/template rows
+    // (which carry example dates/times) and real data rows.
+    const dataLike = /\d{5}|\d{1,2}:\d{2}|\d{4}[-.]\d{1,2}|\d{1,2}\s*월\s*\d{1,2}\s*일/.test(text);
+    if (hits < 1 || dataLike) continue;
+    tokens.push(...line);
+  }
+  const sorted = [...tokens].sort((a, b) => a.left - b.left);
+  const clusters: Array<{ start: number; right: number; words: TsvWord[] }> = [];
+  for (const word of sorted) {
+    const last = clusters[clusters.length - 1];
+    const completesLabel = last && !headerKeyFor(headerLabel(last.words))
+      && headerKeyFor(headerLabel([...last.words, word]))
+      && word.left - last.right <= word.width / Math.max(word.text.length, 1) * 2;
+    if (last && (word.left <= last.right || completesLabel)) {
+      last.words.push(word);
+      last.right = Math.max(last.right, word.left + word.width);
+    } else clusters.push({ start: word.left, right: word.left + word.width, words: [word] });
+  }
+  // Centered labels and left-aligned values have different starting positions.
+  // Choose vertical whitespace observed in body rows between header centers,
+  // rather than bisecting the labels' left coordinates.
+  const bodyLines = lines.filter(line => line[0].page_num === page && line[0].top > top
+    && line.some(word => /^\d{4,6}$/.test(word.text)) && !isGenericHeaderLine(normalizeCell(line) ?? ''));
+  const body = bodyLines.flat();
+  const edges = clusters.slice(1).map((cluster, i) => {
+    const previous = clusters[i];
+    const lo = (previous.start + previous.right) / 2;
+    const hi = (cluster.start + cluster.right) / 2;
+    const middle = (lo + hi) / 2;
+    // Right-aligned numbers can begin to the right of the header center.
+    const starts = [...new Set(body.map(word => word.left))].filter(x => x > lo && x <= cluster.right);
+    const glyphWidths = body.map(word => word.width / Math.max(word.text.length, 1)).sort((a, b) => a - b);
+    const tolerance = (glyphWidths[Math.floor(glyphWidths.length / 2)] ?? 0);
+    const repeatedStarts = starts.map(x => ({ x, support: bodyLines.filter(line =>
+      line.some(word => Math.abs(word.left - x) <= tolerance)).length }))
+      .filter(candidate => candidate.support > bodyLines.length / 2)
+      .sort((a, b) => b.support - a.support || Math.abs(a.x - hi) - Math.abs(b.x - hi));
+    if (repeatedStarts.length) {
+      const start = repeatedStarts[0].x;
+      const ends = body.map(word => word.left + word.width).filter(x => x < start && x >= lo);
+      return ends.length ? (Math.max(...ends) + start) / 2 : (lo + start) / 2;
+    }
+    const positions = [...new Set([lo, hi, ...body.flatMap(word => [word.left, word.left + word.width])])]
+      .filter(x => x >= lo && x <= hi).sort((a, b) => a - b);
+    const candidates = [middle, ...positions.slice(1).map((x, j) => (positions[j] + x) / 2)];
+    return candidates.map(x => ({ x, crossings: body.filter(word => word.left < x && word.left + word.width > x).length }))
+      .sort((a, b) => a.crossings - b.crossings || Math.abs(a.x - middle) - Math.abs(b.x - middle))[0].x;
+  });
+  const bounds = clusters.map((cluster, i) => ({
+    key: headerKeyFor(headerLabel(cluster.words)),
+    lo: i === 0 ? -Infinity : edges[i - 1],
+    hi: i === clusters.length - 1 ? Infinity : edges[i],
+  }));
+  return bounds.filter((bound): bound is HeaderBound => bound.key !== null);
+}
+
+function cellsByHeader(line: TsvWord[], bounds: HeaderBound[]): Map<string, TsvWord[]> {
+  const cells = new Map<string, TsvWord[]>();
+  for (const word of line) {
+    const bound = bounds.find((candidate) => word.left >= candidate.lo && word.left < candidate.hi);
+    if (!bound) continue;
+    const words = cells.get(bound.key) ?? [];
+    words.push(word);
+    cells.set(bound.key, words);
+  }
+  return cells;
+}
+
+function parseGenericLine(
+  line: TsvWord[],
+  term: string,
+  examType: string,
+  bounds: HeaderBound[],
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'> | null {
+  const rawText = normalizeCell(line);
+  if (!rawText) return null;
+  const cells = splitGenericCells(line);
+  const headerCells = bounds.length > 0 ? cellsByHeader(line, bounds) : undefined;
+  const fromHeader = (key: string): string | null => {
+    const words = headerCells?.get(key);
+    const value = words && words.length > 0 ? normalizeCell(words) : null;
+    return value && !/^[-–—.]+$/.test(value) ? value : null;
+  };
+
+  const codeCell = cells.find((cell) => /^\d{5}$/.test(cell));
+  const headerCode = fromHeader('code');
+  const courseCode = (headerCode && /^\d{4,6}$/.test(headerCode) ? headerCode : null)
+    ?? codeCell ?? rawText.match(GENERIC_CODE)?.[0] ?? null;
+
+  const headerSection = fromHeader('section');
+  const section = (headerSection && /^\d{1,3}$/.test(headerSection) ? headerSection : null) ?? (() => {
+    const index = codeCell ? cells.indexOf(codeCell) : -1;
+    const rest = index >= 0 ? cells.slice(index + 1) : cells;
+    return rest.find((cell) => /^\d{1,2}$/.test(cell)) ?? null;
+  })();
+
+  const lectureHeader = fromHeader('lecture_time');
+  const headerName = fromHeader('name');
+  const heuristicName = cells
+    .filter((cell) => cell.trim().length >= 3
+      && /[가-힣A-Za-z]/.test(cell)
+      && !/^\d+$/.test(cell)
+      && !GENERIC_DATE.test(cell)
+      && !/\d{1,2}:\d{2}/.test(cell)
+      && !GENERIC_METHOD.test(cell)
+      && !GENERIC_NON_COURSE.test(cell)
+      && cell !== lectureHeader
+      && !GENERIC_HEADER_TOKENS.includes(cell))
+    .sort((a, b) => b.length - a.length)[0] ?? null;
+  // Prefer the mapped name column, but fall back to the longest course-like cell:
+  // documents without a code column or with an unfamiliar header still need a name.
+  const courseName = (headerName && /[가-힣A-Za-z]/.test(headerName) ? headerName : null) ?? heuristicName;
+
+  const headerMethod = fromHeader('method');
+  const examMethod = normalizeGenericMethod(
+    (headerMethod && GENERIC_METHOD.test(headerMethod) ? headerMethod : null)
+      ?? cells.find((cell) => GENERIC_METHOD.test(cell))
+      ?? rawText.match(GENERIC_METHOD)?.[0],
+  );
+  const headerDate = fromHeader('date');
+  const examDate = toIsoDate(
+    (headerDate && GENERIC_DATE.test(headerDate) ? headerDate : null) ?? rawText.match(GENERIC_DATE)?.[0] ?? null,
+    term,
+  );
+  const times = rawText.match(GENERIC_TIME) ?? [];
+  const lectureTime = (lectureHeader && GENERIC_LECTURE_TIME.test(lectureHeader) ? lectureHeader : null)
+    ?? cells.find((cell) => GENERIC_LECTURE_TIME.test(cell) && cell.length <= 24) ?? null;
+
+  if (!courseCode && !courseName) return null;
+  return {
+    term,
+    exam_type: examType,
+    course_code: courseCode,
+    course_name: courseName ?? '',
+    section,
+    lecture_time: lectureTime,
+    instructor: fromHeader('instructor'),
+    exam_method: examMethod,
+    exam_date: examDate,
+    start_time: toTime(bounds.some(bound => bound.key === 'start') ? fromHeader('start') : times[0] ?? null),
+    end_time: toTime(bounds.some(bound => bound.key === 'end') ? fromHeader('end') : times[1] ?? null),
+    building: fromHeader('building'),
+    rooms: fromHeader('rooms') ?? cells.find((cell) => /^\d{3,4}(?:[-,~]\s*\d{3,4})*\s*호?$/.test(cell.trim())) ?? null,
+    note: fromHeader('note'),
+    raw_text: rawText,
+  };
+}
+
+// A course-code column is the most reliable row anchor: a new logical row starts
+// only where the code column holds a 5-digit code, so wrapped continuation lines
+// (which start with stray digits) do not split a row.
+function findCodeColumn(words: TsvWord[]): { minX: number; maxX: number } | null {
+  const codes = words.filter((word) => /^\d{5}$/.test(word.text));
+  if (codes.length < 2) return null;
+  const minX = Math.min(...codes.map((word) => word.left));
+  const maxX = Math.max(...codes.map((word) => word.left + word.width));
+  // A real column is narrow; a wide spread means these are not a code column.
+  if (maxX - minX > 120) return null;
+  return { minX: minX - 2, maxX: maxX + 2 };
+}
+
+function parseGenericRows(
+  words: TsvWord[],
+  term: string,
+  examType: string,
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] {
+  const pages = new Map<number, TsvWord[]>();
+  for (const word of words) {
+    const page = pages.get(word.page_num) ?? [];
+    page.push(word);
+    pages.set(word.page_num, page);
+  }
+  const schedules: Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] = [];
+  let headerBounds: HeaderBound[] = [];
+  for (const page of pages.values()) {
+    const detected = detectHeaderBounds(page);
+    if (detected.length) headerBounds = detected;
+    schedules.push(...parseGenericPageRows(page, term, examType, headerBounds));
+  }
+  return schedules;
+}
+
+function parseGenericPageRows(
+  words: TsvWord[],
+  term: string,
+  examType: string,
+  headerBounds: HeaderBound[],
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] {
+  const codeColumn = findCodeColumn(words);
+  const startsRow = (line: TsvWord[]): boolean => {
+    if (codeColumn) {
+      return line.some((word) =>
+        word.left >= codeColumn.minX && word.left < codeColumn.maxX && /^\d{5}$/.test(word.text));
+    }
+    const first = line[0]?.text ?? '';
+    return /^\d+$/.test(first) || /^(서울|다빈치|안성)/.test(first);
+  };
+
+  const rows: TsvWord[][] = [];
+  let current: TsvWord[] | null = null;
+  for (const line of groupVisualLines(words)) {
+    const text = normalizeCell(line);
+    if (!text || isGenericHeaderLine(text)) continue;
+    if (current === null || startsRow(line)) {
+      if (current) rows.push(current);
+      current = [...line];
+    } else {
+      current = current.concat(line);
+    }
+  }
+  if (current) rows.push(current);
+
+  const schedules: Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] = [];
+  const expectedTerm = parseExamTerm(term)?.canonical;
+  for (const row of rows) {
+    // When a row states its own term, honor it so a different term's document is
+    // not reported as this term's schedule.
+    if (expectedTerm) {
+      const declared = GENERIC_TERM.exec(normalizeCell(row) ?? '');
+      const declaredTerm = declared ? parseExamTerm(`${declared[1]}-${declared[2]}`)?.canonical : undefined;
+      if (declaredTerm && declaredTerm !== expectedTerm) continue;
+    }
+    const parsed = parseGenericLine(row, term, examType, headerBounds);
+    if (parsed) schedules.push(parsed);
+  }
+  return schedules;
+}
+
+// Some colleges publish a timetable grid (date rows x period columns) rather than
+// one row per course. Rather than guessing cells from column coordinates, dump one
+// record per date band (date + its text + room note) so the schedule is never lost.
+const GRID_TIME = /^\d{1,2}:\d{2}$/;
+
+function gridTimeRanges(line: TsvWord[]): Array<{ x: number; start: string | null; end: string | null }> {
+  const ranges: Array<{ x: number; start: string | null; end: string | null }> = [];
+  for (let i = 0; i < line.length; i++) {
+    // Period headers sometimes wrap each range in parentheses: "(9:00 ~ 10:00)".
+    const start = line[i].text.replace(/[()]/g, '');
+    if (!GRID_TIME.test(start)) continue;
+    const separator = line[i + 1]?.text ?? '';
+    const end = (line[i + 2]?.text ?? '').replace(/[()]/g, '');
+    if (end && /^[~～-]$/.test(separator) && GRID_TIME.test(end)) {
+      ranges.push({ x: line[i].left, start: toTime(start), end: toTime(end) });
+      i += 2;
+    }
+  }
+  return ranges;
+}
+
+function parseGridCells(
+  words: TsvWord[],
+  term: string,
+  examType: string,
+): Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] {
+  const pages = new Map<number, TsvWord[]>();
+  for (const word of words) {
+    const page = pages.get(word.page_num) ?? [];
+    page.push(word);
+    pages.set(word.page_num, page);
+  }
+  const schedules: Omit<ExamScheduleRecord, 'id' | 'source_document_id'>[] = [];
+  for (const page of pages.values()) {
+    const lines = groupVisualLines(page);
+    // The busiest time-range line is the grid header (12:00 ~ 12:50, one per period).
+    const headerLine = lines
+      .map((line) => ({ line, ranges: gridTimeRanges(line) }))
+      .filter((entry) => entry.ranges.length >= 2)
+      .reduce<{ line: TsvWord[]; ranges: ReturnType<typeof gridTimeRanges> } | null>(
+        (best, entry) => (!best || entry.ranges.length > best.ranges.length ? entry : best), null);
+    if (!headerLine) continue;
+    // Dates sit in the left margin; keep every M/D token below the header so a
+    // grid whose date column drifts right of the first period still resolves.
+    const markers = page.filter((word) => /^\d{1,2}\/\d{1,2}$/.test(word.text)
+      && word.top > headerLine.line[0].top).sort((a, b) => a.top - b.top);
+    if (markers.length === 0) continue;
+
+    const isContentLine = (line: TsvWord[]): boolean => {
+      const text = normalizeCell(line) ?? '';
+      if (!text) return false;
+      if (gridTimeRanges(line).length >= 6) return false;
+      return !/^\s*시간\b/.test(text) && !text.includes('일자') && !text.includes('전공과목구분') && !/시험\s*응시/.test(text);
+    };
+
+    for (let i = 0; i < markers.length; i++) {
+      const marker = markers[i];
+      const previous = markers[i - 1];
+      const next = markers[i + 1];
+      const lower = previous ? (previous.top + marker.top) / 2 : headerLine.line[0].top;
+      const upper = next ? (marker.top + next.top) / 2
+        : previous ? marker.top + (marker.top - previous.top) / 2 : marker.top + 200;
+      const bandWords: TsvWord[] = [];
+      let firstRange: { start: string | null; end: string | null } | undefined;
+      for (const line of lines) {
+        if (line[0].top <= lower || line[0].top > upper || !isContentLine(line)) continue;
+        for (const range of gridTimeRanges(line)) firstRange ??= range;
+        for (const word of line) {
+          if (/^[~()]$/.test(word.text)) continue;
+          if (/^\d{1,2}\/\d{1,2}$/.test(word.text) || /^(시간|일자|교시)$/.test(word.text)) continue;
+          bandWords.push(word);
+        }
+      }
+      const rawText = normalizeCell(bandWords);
+      if (!rawText || !/[가-힣A-Za-z]/.test(rawText)) continue;
+      const room = /시험\s*장소\s*[:：]?\s*([0-9A-Za-z가-힣-]+호?)/.exec(rawText)?.[1] ?? null;
+      const name = rawText.replace(/시험\s*장소[\s\S]*$/, '').replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+      schedules.push({
+        term, exam_type: examType, course_code: null, course_name: name || rawText.slice(0, 80),
+        section: null, lecture_time: null, instructor: null,
+        exam_method: normalizeGenericMethod(rawText.match(GENERIC_METHOD)?.[0]),
+        exam_date: toIsoDate(marker.text, term),
+        start_time: firstRange?.start ?? null, end_time: firstRange?.end ?? null,
+        building: null, rooms: room, note: null, raw_text: rawText,
+      });
+    }
+  }
+  return schedules;
+}
+
 export function parseExamScheduleTsv(
   tsv: string,
   input: { term: string; exam_type: string },
@@ -351,6 +777,14 @@ export function parseExamScheduleTsv(
 
   const layout = detectLayout(words);
   if (!layout) {
+    const grid = parseGridCells(words, input.term, input.exam_type);
+    if (grid.length > 0) {
+      return { ok: true, parser: 'pdftotext-tsv', layout: 'grid', schedules: grid };
+    }
+    const generic = parseGenericRows(words, input.term, input.exam_type);
+    if (generic.length > 0) {
+      return { ok: true, parser: 'pdftotext-tsv', layout: 'generic', schedules: generic };
+    }
     return {
       ok: false,
       error_code: 'EXAM_PARSER_UNSUPPORTED',
@@ -391,12 +825,28 @@ export function parseExamScheduleTsv(
   }
 
   if (schedules.length === 0) {
+    const generic = parseGenericRows(words, input.term, input.exam_type);
+    if (generic.length > 0) {
+      return { ok: true, parser: 'pdftotext-tsv', layout: 'generic', schedules: generic };
+    }
     return {
       ok: false,
       error_code: 'EXAM_PARSER_UNSUPPORTED',
       message: '시험 시간표 행을 식별하지 못했습니다.',
       retryable: false,
     };
+  }
+
+  // A layout match only wins when it actually recovers fields. If the specialized
+  // parser finds rows but no instructors while the header-mapped path does, absorb
+  // it (e.g. an unfamiliar print variant of a known college).
+  {
+    const generic = parseGenericRows(words, input.term, input.exam_type);
+    const specializedInstructors = schedules.filter((row) => row.instructor).length;
+    const genericInstructors = generic.filter((row) => row.instructor).length;
+    if (specializedInstructors === 0 && genericInstructors * 2 > generic.length) {
+      return { ok: true, parser: 'pdftotext-tsv', layout: 'generic', schedules: generic };
+    }
   }
 
   return { ok: true, parser: 'pdftotext-tsv', layout, schedules };

@@ -11,6 +11,67 @@ export interface ToolErrorResult {
   debug?: string;        // sanitized technical detail, never credentials
 }
 
+// Diagnostic arrays a tool may attach to a failure without a top-level message.
+const NESTED_DIAGNOSTIC_KEYS = ['errors', 'partial_failures', 'results'] as const;
+
+function nestedDiagnostics(details: Record<string, unknown>): Array<Record<string, unknown>> {
+  const entries: Array<Record<string, unknown>> = [];
+  for (const key of NESTED_DIAGNOSTIC_KEYS) {
+    const value = details[key];
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const diagnostic = entry as Record<string, unknown>;
+      // Batch results also contain successful and normally excluded items.
+      // Only actual failures may describe the aggregate error.
+      if (key === 'results' && diagnostic.status !== 'failed') continue;
+      entries.push(diagnostic);
+    }
+  }
+  return entries;
+}
+
+/** Add the common failure contract while retaining tool-specific diagnostics. */
+export function normalizeToolError(value: unknown, fallbackMessage: string): ToolErrorResult & Record<string, unknown> {
+  const details = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+  const legacyCodes: Record<string, string> = {
+    not_found: 'FILE_NOT_FOUND',
+    file_missing: 'FILE_MISSING',
+    too_large: 'FILE_TOO_LARGE',
+  };
+  const errorCode = typeof details.error_code === 'string' && details.error_code
+    ? details.error_code
+    : typeof details.reason === 'string' && details.reason
+      ? details.reason
+      : typeof details.code === 'string' && details.code
+        ? (Object.hasOwn(legacyCodes, details.code) ? legacyCodes[details.code] : details.code)
+        : 'TOOL_ERROR';
+  // Tools that report a failure through nested diagnostics (partial failures,
+  // per-source issues, per-item outcomes) still need a usable top-level message
+  // and retryability signal instead of the generic fallback.
+  const nested = nestedDiagnostics(details);
+  const nestedMessageEntry = nested.find((entry) =>
+    (typeof entry.message === 'string' && entry.message.length > 0)
+    || (typeof entry.reason === 'string' && entry.reason.length > 0));
+  const nestedMessage = typeof nestedMessageEntry?.message === 'string' && nestedMessageEntry.message
+    ? nestedMessageEntry.message
+    : typeof nestedMessageEntry?.reason === 'string' && nestedMessageEntry.reason
+      ? nestedMessageEntry.reason
+      : undefined;
+  return {
+    ...details,
+    ok: false,
+    error_code: errorCode,
+    message: typeof details.message === 'string' && details.message
+      ? details.message
+      : nestedMessage ?? fallbackMessage,
+    retryable: typeof details.retryable === 'boolean'
+      ? details.retryable
+      : nested.some((entry) => entry.retryable === true),
+  };
+}
+
 /**
  * Strips URLs of query/hash (which may carry tokens) and clamps length, so a
  * raw error message can be safely surfaced in the `debug` field.

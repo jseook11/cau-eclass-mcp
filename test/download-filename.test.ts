@@ -7,6 +7,7 @@ import * as path from 'node:path';
 
 import { BrowserSession } from '../src/browser-session.js';
 import { downloadFileToDisk } from '../src/tools/download-file.js';
+import { resolveDownloadFilename } from '../src/download-filename.js';
 
 const cases = [
   ...['main.py', 'main.c', 'main.cpp', 'main.PY', 'data.myformat', 'archive.7z'].map((name) => ({
@@ -93,3 +94,17 @@ for (const route of ['direct', 'OCS'] as const) {
     });
   }
 }
+
+test('prototype property names in a server content type never leak into filenames', () => {
+  for (const contentType of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.equal(resolveDownloadFilename('강의자료', { contentType }), '강의자료');
+  }
+  assert.equal(resolveDownloadFilename('강의자료', { contentType: 'application/pdf' }), '강의자료.pdf');
+  assert.equal(
+    resolveDownloadFilename('강의자료', {
+      contentType: 'constructor',
+      contentDisposition: 'attachment; filename="notes.pdf"',
+    }),
+    '강의자료.pdf',
+  );
+});

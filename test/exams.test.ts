@@ -462,6 +462,34 @@ test('parseExamScheduleTsv parses software-college rows', () => {
   }
 });
 
+test('parseExamScheduleTsv falls back to layout-agnostic rows for unknown formats', () => {
+  const input = tsv([
+    word(1, 20, 40, '2026학년도 1학기 시험 안내', 120),
+    word(1, 20, 80, '54288', 20), word(1, 60, 80, '01'), word(1, 120, 80, '벤처창업경영론', 60),
+    word(1, 300, 80, '월7,8,9'), word(1, 400, 80, '최용석'), word(1, 470, 80, '1.'),
+    word(1, 482, 80, '대면시험'), word(1, 560, 80, '2026-06-19'), word(1, 650, 80, '12:00'),
+    word(1, 700, 80, '13:00'), word(1, 760, 80, '310'), word(1, 800, 80, '932'),
+    word(1, 20, 110, '54293', 20), word(1, 60, 110, '01'), word(1, 120, 110, '창업투자와 M&A', 70),
+    word(1, 300, 110, '화4,5,6'), word(1, 400, 110, '최용석'), word(1, 470, 110, '3.'),
+    word(1, 482, 110, '과제물대체'),
+  ]);
+  const result = parseExamScheduleTsv(input, { term: '2026-1', exam_type: 'final' });
+  assert.ok(result.ok);
+  assert.equal(result.layout, 'generic');
+  assert.equal(result.schedules.length, 2);
+  const exam = result.schedules[0];
+  assert.equal(exam.course_code, '54288');
+  assert.equal(exam.course_name, '벤처창업경영론');
+  assert.equal(exam.section, '01');
+  assert.equal(exam.exam_method, '대면시험');
+  assert.equal(exam.exam_date, '2026-06-19');
+  assert.equal(exam.start_time, '12:00');
+  assert.equal(exam.end_time, '13:00');
+  assert.match(exam.raw_text ?? '', /벤처창업경영론/);
+  assert.equal(result.schedules[1].exam_method, '과제물대체');
+  assert.equal(result.schedules[1].exam_date, null);
+});
+
 test('parseExamScheduleTsv parses general-education rows including online exams', () => {
   const input = tsv([
     word(1, 20, 17, '[서울캠퍼스]', 80),
@@ -940,6 +968,10 @@ test('parseCanvasAccountName parses live account name formats', () => {
   // 그 외 파싱 불가 형태는 null (원문은 canvas_account_name으로 보존)
   assert.deepEqual(parseCanvasAccountName('중앙대학교'), { college: null, department: null });
   assert.deepEqual(parseCanvasAccountName(null), { college: null, department: null });
+  // 객체 프로토타입 속성명과 같은 account 이름은 매핑/파싱되지 않는다
+  for (const prototypeKey of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.deepEqual(parseCanvasAccountName(prototypeKey), { college: null, department: null });
+  }
 });
 
 test('syncCourseMetadata stores learningx_sis result with confirmed fields', async () => {

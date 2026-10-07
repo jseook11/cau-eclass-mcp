@@ -15,9 +15,14 @@ skill/하네스 작성 시 이 문서를 참조한다. 새 툴이 추가되면 �
   - 배열 반환 툴(`eclass_get_courses`, `eclass_get_courses_cached`, `eclass_get_assignments`,
     `eclass_get_announcements`, `eclass_list_downloads`)은 `structuredContent.result` 래핑에 맞춰
     `{ result: [...] }` 형태로 기술한다.
-  - 스키마는 느슨하다(`additionalProperties` 미지정 = 허용, `required`는 성공/실패와 무관하게 항상
-    존재하는 최소 필드만). partial success·optional 필드·`{ ok: false, error_code, ... }` 실패 응답이
-    같은 스키마로 통과한다.
+  - 출력 스키마의 `anyOf`는 기존 성공 형태와 공통 오류 형태를 구분한다. 성공 응답의 필수
+    필드는 유지하고, 오류는 `ok: false`, `error_code`, `message`, `retryable`을 필수로 제공한다.
+    도구별 추가 진단 필드는 허용한다.
+- 실패 응답은 `isError: true`이며 `content[0].text`의 JSON과 `structuredContent`에 같은 오류 객체를
+  제공한다. 입력 검증 실패는 `INVALID_INPUT`과 `validation_errors: [{ path, code, message }]`를
+  반환하며 인증 전에 검증한다. 시험 학기 오류의 기존 `reason: INVALID_EXAM_TERM`은 유지한다.
+  예: 없는 파일 요청은 `{ ok: false, error_code: "FILE_NOT_FOUND", message: "...", retryable: false }`.
+  기존 `code`, `reason`, 부분 실패 목록 등 도구별 진단은 공통 필드와 함께 보존한다.
 - 툴 description은 `[로컬]`/`[네트워크]` 접두사로 비용을 표시한다. `[로컬]`은 로컬 DB/캐시만 사용해 즉시 반환, `[네트워크]`는 Canvas API 호출이며 첫 호출 시 자동 로그인이 끼어들 수 있다. 같은 정보를 얻을 수 있다면 `[로컬]` 도구를 우선한다.
 - 인증은 서버가 처리한다 (Keychain 토큰 캐시 → 만료 시 HTTP SSO 자동 로그인). 호출 측에서 토큰을 다룰 필요는 없다.
   - 서버 측에서 토큰이 만료/회수되어 401이 돌아오면 캐시 토큰을 폐기하고 자동 재로그인 후 해당 요청을 1회 재시도한다.
@@ -209,7 +214,7 @@ HTTP 인증, courses API, LearningX 자료 API와 자격증명 저장소를 점�
   - `by`: `'subject'`(과목명, 기본) 또는 `'professor'`(교수명).
 - 출력(성공): `{ ok: true, items: SyllabusSearchItem[] }`
   - `SyllabusSearchItem`: `{ year, term, campus_code, course_code(학수번호), section(분반), course_no_full, course_name, sust_code, college, department, classification, professor, time_room, has_file }`
-- 출력(실패): `{ ok: false, error_code, message }`
+- 출력(실패): `{ ok: false, error_code, message, retryable }`
   - 주요 코드: `SYLLABUS_SEARCH_FAILED`, `SYLLABUS_TERM_UNRESOLVED`.
 - 사용 시점: 학기 중 상시. "OO 과목 교재가 뭐야?" 같은 질문에 검색 후 `eclass_get_syllabus`로 상세 조회. 시험 시간표 매칭에 필요한 학수번호·분반 확인용으로도 활용 가능.
 
@@ -228,7 +233,7 @@ HTTP 인증, courses API, LearningX 자료 API와 자격증명 저장소를 점�
     - `assessment[]`: `{ item, ratio, description }`
     - `schedule[]`: `{ week, instructor, topic, ... }`
     - `raw_text`: 항상 포함됨. 그룹명과 원본 보고서 데이터의 JSON 텍스트. 구조화 항목 외의 수업 방식·과제 등은 이 필드에서 확인한다.
-- 출력(실패): `{ ok: false, error_code, message }`
+- 출력(실패): `{ ok: false, error_code, message, retryable }`
   - 주요 코드: `SYLLABUS_INVALID_INPUT`, `SYLLABUS_NOT_FOUND`, `SYLLABUS_IDENTITY_MISMATCH`, `SYLLABUS_TRANSPORT_FAILED`, `SYLLABUS_PROTOCOL_FAILED`, `SYLLABUS_MAPPING_FAILED`, `SYLLABUS_INTERNAL_ERROR`.
 - **데이터 경로**: OZ guest HTTP 세션 → `pUskLei008.odi` 데이터 모듈 → schema/record 디코딩 → `SyllabusDocument` 매핑. 학기·캠퍼스·학과·학수번호·분반을 응답과 대조한다.
 - **본문 조회**: 사용자 로그인 없이 학교 report 서버의 guest 조회를 사용한다. 검색은 사용자 포털 인증이 필요하다. 상세 구현은 [SYLLABUS.md](SYLLABUS.md)를 참고한다.
@@ -382,7 +387,7 @@ MCP 서버 로컬 캐시의 다운로드 기록 원본 목록. 파일 본문은 
 - 입력: `{ file_id: string }`
   - `file_id`: `eclass_search_downloads`/`eclass_list_downloads`가 반환하는 file_id. 영상은 `video:<id>`.
 - 출력(성공): `structuredContent = { file_id, display_name, mime_type, size_bytes, delivered: true }` + `content[0] = { type: "resource", resource: { uri: "file:///<파일명>", mimeType, blob } }`
-- 출력(실패, `isError`): `not_found`(file_id 없음) / `file_missing`(레코드는 있으나 디스크 파일 없음) / `too_large`(`ECLASS_HANDOFF_MAX_BYTES` 초과, 기본 25MB)
+- 출력(실패, `isError`): 공통 구조화 오류. `FILE_NOT_FOUND`(기록 없음) / `FILE_MISSING`(레코드는 있으나 디스크 파일 없음) / `FILE_TOO_LARGE`(`ECLASS_HANDOFF_MAX_BYTES` 초과, 기본 25MB)를 사용하며 기존 `code`(`not_found`/`file_missing`/`too_large`)도 함께 보존한다.
 - 청킹 미지원 — 한계 초과 파일은 거절한다.
 
 ## 다운로드 전략 (DownloadStrategy)

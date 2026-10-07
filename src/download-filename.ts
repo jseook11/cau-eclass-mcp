@@ -40,6 +40,8 @@ export function resolveDownloadFilename(
   }
 
   const contentType = (headers.contentType ?? '').split(';')[0].trim().toLowerCase();
-  const ext = MIME_TO_EXT[contentType];
+  // Object.hasOwn: a server-supplied type like "constructor" must not resolve to
+  // an inherited Object.prototype member and corrupt the filename.
+  const ext = Object.hasOwn(MIME_TO_EXT, contentType) ? MIME_TO_EXT[contentType] : undefined;
   return ext ? safeName + ext : safeName;
 }
